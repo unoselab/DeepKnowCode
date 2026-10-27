@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# Model checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.h5
+
+# Large datasets and generated outputs
+/data/*
+!/data/.gitkeep
+
+/results/*
+!/results/.gitkeep
+
+/logs/*
+!/logs/.gitkeep
+
+# Temporary files
+*.tmp
+*.swp
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+#
+xrun.sh
+ylog.txt
