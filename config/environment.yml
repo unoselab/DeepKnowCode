@@ -1,0 +1,7 @@
+name: deepknowcode
+channels:
+  - defaults
+dependencies:
+  - pip
+  - python=3.12
+prefix: /home/user1-system11/miniconda3/envs/deepknowcode
