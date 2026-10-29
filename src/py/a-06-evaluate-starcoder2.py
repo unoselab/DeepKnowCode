@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""A-05: strict code-ID alignment, then StarCoder2-7B label-likelihood inference.
-Read-only source data. Never silently score unresolved or ambiguous IDs.
-"""
+"""Evaluate code clone classification on a fixed paired dataset."""
 import argparse, csv, json, hashlib, os, time
 from collections import defaultdict
 from pathlib import Path
@@ -63,30 +61,54 @@ def build_code_map(paths,wanted):
 
 def preflight(args):
     out=args.output_dir;out.mkdir(parents=True,exist_ok=True)
-    tasks=[];reports=[];bylang={};maps={}
+    tasks=[];reports=[];bylang={}
     for lang in ('java','python'):
-        jobs,wanted=targets(args.rq4_root,lang)
-        paths=candidates(args.rq3_root,lang)
-        print(f'[A-05] {lang}: {len(jobs)} projects, {len(wanted)} unique IDs, {len(paths)} code corpora',flush=True)
-        code_map,conflict,scanned,usable=build_code_map(paths,wanted)
-        missing=wanted-code_map.keys();invalid=missing|conflict
-        bylang[lang]={'projects':len(jobs),'requested_ids':len(wanted),'resolved_ids':len(wanted)-len(invalid),'missing_ids':len(missing),'ambiguous_ids':len(conflict),'jsonl_paths':len(paths),'lines_scanned':scanned,'matching_code_records':usable}
-        for ix in sorted(invalid):reports.append({'language':lang,'id':ix,'reason':'ambiguous' if ix in conflict else 'missing'})
-        maps[lang]=code_map
+        gt_dir=args.data_root/'ground_truth'/lang
+        code_path=args.data_root/'code'/f'{lang}.jsonl'
+        if not gt_dir.is_dir() or not code_path.is_file():raise FileNotFoundError(f'Missing staged dataset: {gt_dir} / {code_path}; run data staging first')
+        code_map={}
+        with code_path.open(encoding='utf-8') as f:
+            for line in f:
+                d=json.loads(line)
+                if d['id'] in code_map:raise ValueError(f'Duplicate staged code ID: {lang}/{d["id"]}')
+                code_map[d['id']]=d['code']
+        jobs=[];wanted=set()
+        for fp in sorted(gt_dir.glob('*.csv')):
+            project=fp.name.removeprefix('pred_').removesuffix('_with_refactorability.csv')
+            with fp.open(newline='',encoding='utf-8-sig') as f:rows=list(csv.DictReader(f))
+            jobs.append((project,rows))
+            for row in rows:wanted.update((row['pair_left_func'].strip(),row['pair_right_func'].strip()))
+        missing=wanted-set(code_map)
+        for ix in sorted(missing):reports.append({'language':lang,'id':ix,'reason':'missing'})
+        bylang[lang]={'projects':len(jobs),'requested_ids':len(wanted),'resolved_ids':len(wanted)-len(missing),'missing_ids':len(missing)}
         for project,rows in jobs:
             for i,row in enumerate(rows):
                 a=row['pair_left_func'].strip();b=row['pair_right_func'].strip()
                 tasks.append({'language':lang,'project':project,'row':i,'left_id':a,'right_id':b,'label':gt(a,b),'code_a':code_map.get(a),'code_b':code_map.get(b)})
+        print(f'[A-06] {lang}: projects={len(jobs)} pairs={sum(map(lambda x:len(x[1]),jobs))} missing={len(missing)}',flush=True)
     emit_csv(out/'unresolved_ids.csv',reports,['language','id','reason'])
     (out/'preflight.json').write_text(json.dumps({'languages':bylang,'pairs':len(tasks)},indent=2)+'\n')
-    if reports:
-        print('[A-05] BLOCKED: missing/ambiguous code IDs. See',out/'unresolved_ids.csv',flush=True)
-        raise SystemExit(3)
-    # Preserve exact pair list and code in the local output, for stable worker input.
+    if reports:raise RuntimeError(f'{len(reports)} missing IDs: see unresolved_ids.csv')
     p=out/'aligned_pairs.jsonl'
     with p.open('w',encoding='utf-8') as f:
         for t in tasks:f.write(json.dumps(t,ensure_ascii=False)+'\n')
-    print('[A-05] Alignment complete:',len(tasks),'pairs;',p,flush=True)
+    print('[A-06] Alignment complete:',len(tasks),'pairs',flush=True)
+
+def audit_lengths(args):
+    from transformers import AutoTokenizer
+    tok=AutoTokenizer.from_pretrained(args.model_id,revision=args.revision,local_files_only=True)
+    overs=[];max_tokens=0;count=0
+    with (args.output_dir/'aligned_pairs.jsonl').open(encoding='utf-8') as f:
+        for line in f:
+            t=json.loads(line); n=len(tok.encode(prompt(t),add_special_tokens=False))
+            max_tokens=max(max_tokens,n);count+=1
+            if n>args.max_input_tokens:overs.append({'language':t['language'],'project':t['project'],'row':t['row'],'tokens':n})
+            if count%5000==0:print(f'[A-06] token audit {count} pairs, max={max_tokens}',flush=True)
+    emit_csv(args.output_dir/'oversized_inputs.csv',overs,['language','project','row','tokens'])
+    info={'pairs':count,'max_tokens':max_tokens,'limit':args.max_input_tokens,'oversized':len(overs)}
+    (args.output_dir/'token_audit.json').write_text(json.dumps(info,indent=2)+'\n')
+    print('[A-06] token audit:',info,flush=True)
+    if overs:raise RuntimeError(f'{len(overs)} oversized pairs. See oversized_inputs.csv. Increase A06_MAX_INPUT_TOKENS within model context limit after review.')
 
 def prompt(t):
     return ('Determine whether the following two code fragments are code clones. '
@@ -172,19 +194,19 @@ def summarize(args):
 
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument('command',choices=['preflight','infer','summarize'])
-    ap.add_argument('--rq4-root',type=Path,default=Path.home()/'research_dream/2026JournalData/RQ4/c-evaluate_clone')
-    ap.add_argument('--rq3-root',type=Path,default=Path.home()/'research_dream/2026JournalData/RQ3')
+    ap.add_argument('command',choices=['preflight','audit-lengths','infer','summarize'])
+    ap.add_argument('--data-root',type=Path,default=Path(__file__).resolve().parents[2]/'data'/'evaluation')
     ap.add_argument('--output-dir',type=Path,required=True)
     ap.add_argument('--model-id',default='bigcode/starcoder2-7b')
     ap.add_argument('--revision',default='bb9afde76d7945da5745592525db122d4d729eb1')
     ap.add_argument('--worker-index',type=int,default=0)
     ap.add_argument('--num-workers',type=int,default=3)
-    ap.add_argument('--max-input-tokens',type=int,default=4096)
+    ap.add_argument('--max-input-tokens',type=int,default=12000)
     ap.add_argument('--oversize',choices=['error','skip'],default='error')
     ap.add_argument('--progress-every',type=int,default=100)
     args=ap.parse_args()
     if args.command=='preflight':preflight(args)
+    elif args.command=='audit-lengths':audit_lengths(args)
     elif args.command=='infer':infer(args)
     else:summarize(args)
 if __name__=='__main__':main()
