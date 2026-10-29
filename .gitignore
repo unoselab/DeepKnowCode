@@ -19,6 +19,7 @@ venv/
 # Large datasets and generated outputs
 /data/*
 !/data/.gitkeep
+data
 
 /results/*
 !/results/.gitkeep
@@ -38,3 +39,6 @@ venv/
 #
 xrun.sh
 ylog.txt
+
+# Local evaluation datasets
+/data/
