@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 
+# A06_PREFLIGHT_ONLY=1 bash src/sh/a-06-evaluate-starcoder2.sh
+# 
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 mkdir -p "$ROOT/logs" "$ROOT/results/a-06"
@@ -15,7 +18,7 @@ GPUS="${A06_GPUS:-0,1,2}"
 IFS=',' read -r -a GPU_IDS <<< "$GPUS"
 [[ ${#GPU_IDS[@]} -eq 3 ]] || { echo "Specify three GPUs" >&2; exit 2; }
 [[ "${GPU_IDS[0]}" != "${GPU_IDS[1]}" && "${GPU_IDS[0]}" != "${GPU_IDS[2]}" && "${GPU_IDS[1]}" != "${GPU_IDS[2]}" ]] || { echo 'GPU IDs must be distinct' >&2; exit 2; }
-ARGS=(--output-dir "$RUN_DIR" --data-root "$ROOT/data/evaluation" --revision "$REVISION" --max-input-tokens "${A06_MAX_INPUT_TOKENS:-12000}")
+ARGS=(--output-dir "$RUN_DIR" --data-root "$ROOT/data/evaluation" --revision "$REVISION" --max-input-tokens "${A06_MAX_INPUT_TOKENS:-12000}" --window-overlap "${A06_WINDOW_OVERLAP:-0.20}" --aggregation mean-margin)
 echo "[A-06] Start $(date -Is), GPUs=$GPUS; run=$RUN_DIR"
 python "$PY" preflight "${ARGS[@]}"
 python "$PY" audit-lengths "${ARGS[@]}"
@@ -23,7 +26,7 @@ if [[ "${A06_PREFLIGHT_ONLY:-0}" == 1 ]]; then echo '[A-06] preflight + token au
 pids=()
 for wi in 0 1 2; do
   echo "[A-06] worker $wi on GPU ${GPU_IDS[$wi]}"
-  CUDA_VISIBLE_DEVICES="${GPU_IDS[$wi]}" python "$PY" infer "${ARGS[@]}" --worker-index "$wi" --num-workers 3 --oversize error &
+  CUDA_VISIBLE_DEVICES="${GPU_IDS[$wi]}" python "$PY" infer "${ARGS[@]}" --worker-index "$wi" --num-workers 3 &
   pids+=("$!")
 done
 fail=0
