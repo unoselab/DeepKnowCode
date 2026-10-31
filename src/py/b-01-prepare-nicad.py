@@ -64,7 +64,15 @@ def main():
     stamp=datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S-%f')
     out=Path(a.out).resolve() if a.out else root/'results/b-01'/stamp
     if out.exists():raise SystemExit('ERROR: output exists '+str(out))
-    stage=out/'nicad_input'/'salt';stage.mkdir(parents=True)
+    # Create the unique per-run report directory before writing reports.
+    out.mkdir(parents=True, exist_ok=False)
+    # Stable staging location: replace only this B-01-owned directory each run.
+    stage=root/'results/b-01/_staging/salt'
+    stage_parent=(root/'results/b-01/_staging').resolve()
+    if stage.is_symlink() or stage.resolve().parent != stage_parent:
+        raise SystemExit('ERROR: unsafe staging path: '+str(stage))
+    if stage.exists():shutil.rmtree(stage)
+    stage.mkdir(parents=True)
     stats=Counter();audit=[]
     files=sorted(repo.rglob('*.py'))
     if a.max_python_files:files=files[:a.max_python_files]
@@ -92,7 +100,7 @@ def main():
     (out/'filter_summary.json').write_text(json.dumps({'status':'PREPARED','repository':str(repo),'commit':commit,'staged_root':str(stage),'settings':{'excluded_dirs':sorted(SKIP_DIR),'excluded_files':sorted(SKIP_FILE),'exclude_test_named_functions':True,'exclude_pytest_decorators':True},'counts':dict(stats),'limitations':['Heuristic exclusion may retain nonstandard tests and exclude production code with test-like names','Staged line numbers preserved but masked source is not identical to original','NiCad may reject some valid modern Python syntax']},indent=2)+'\n')
     with (out/'filter_audit.csv').open('w',newline='') as h:
         w=csv.DictWriter(h,fieldnames=['file','action','detail']);w.writeheader();w.writerows(audit)
-    print('B-01 v2 NiCad source staged:',stage)
+    print('B-01 v7 NiCad source staged:',stage)
     for k,v in sorted(stats.items()):print('  ',k,':',v)
     print('OUTPUT_DIR='+str(out));print('STAGE_DIR='+str(stage))
 if __name__=='__main__':main()
