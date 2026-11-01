@@ -8,6 +8,7 @@ import pathlib
 import re
 import subprocess
 import sys
+from zoneinfo import ZoneInfo
 
 # Candidates identified by repository name, not historically validated provenance.
 PROJECTS = [
@@ -52,6 +53,7 @@ def main():
     p.add_argument('--update-existing', action='store_true', help='fetch existing repos (never reset/checkout)')
     p.add_argument('--depth', type=int, default=1)
     p.add_argument('--override', action='append', default=[], metavar='NAME=OWNER/REPO')
+    p.add_argument('--identity-audit', type=pathlib.Path, help='B-06 identity-audit CSV with verified remote status; required for --execute')
     a=p.parse_args()
     if a.depth < 1: p.error('--depth must be positive')
     overrides={}
@@ -61,15 +63,44 @@ def main():
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',val): p.error('override must use OWNER/REPO')
         overrides[key]=val
     root=a.root.resolve(); repos=root/'data'/'repositories'
-    stamp=dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-%f')
+    audit_rows={}
+    if a.execute and not a.identity_audit:
+        p.error('--execute requires --identity-audit PATH to a B-06 remote-checked CSV')
+    if a.identity_audit:
+        try:
+            with a.identity_audit.open(newline='', encoding='utf-8-sig') as f:
+                reader=csv.DictReader(f)
+                required={'project','github_slug','remote_status'}
+                if not required.issubset(set(reader.fieldnames or [])):
+                    p.error('identity-audit CSV missing columns: '+', '.join(sorted(required)))
+                for item in reader:
+                    name=item['project']
+                    if name in audit_rows: p.error('duplicate project in audit CSV: '+name)
+                    audit_rows[name]=item
+        except OSError as exc:
+            p.error('cannot read identity-audit CSV: '+str(exc))
+    stamp=dt.datetime.now(ZoneInfo('America/Chicago')).strftime('%Y%m%d-%H%M%S-%f')
     out=root/'results'/'b-06'/stamp
     out.mkdir(parents=True, exist_ok=False)
     chosen=set(a.include)
     known={n for n,_,_ in PROJECTS}
     if chosen-known: p.error('unknown projects: '+','.join(sorted(chosen-known)))
+    # Validate the entire requested acquisition set before making any network or filesystem changes.
+    selected=[(name, overrides.get(name, slug)) for name,slug,_ in PROJECTS if not chosen or name in chosen]
+    if a.execute:
+        for name, slug in selected:
+            audited=audit_rows.get(name)
+            if not audited:
+                p.error('missing project from identity-audit: '+name)
+            if audited['github_slug'].casefold()!=slug.casefold():
+                p.error('mapping mismatch for '+name+': audit='+audited['github_slug']+' acquisition='+slug)
+            if audited['remote_status']!='EXISTS':
+                p.error('remote not verified as EXISTS for '+name+': '+audited['remote_status'])
     rows=[]
-    print('B-06 Python Subject Repository Acquisition | '+('EXECUTE' if a.execute else 'DRY RUN'))
+    print('B-06 v4 Python Subject Repository Acquisition | '+('EXECUTE' if a.execute else 'DRY RUN'))
     print('Repository root:',repos)
+    print('Timezone: America/Chicago')
+    if a.identity_audit: print('IDENTITY_AUDIT:',a.identity_audit)
     for name, slug, verification in PROJECTS:
         if chosen and name not in chosen: continue
         slug=overrides.get(name,slug)
@@ -112,7 +143,7 @@ def main():
     fields=['project','github_slug','url','mapping_status','status','commit','branch','remote','error']
     with (out/'repository_manifest.csv').open('w',newline='',encoding='utf-8') as f:
         w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(rows)
-    (out/'summary.json').write_text(json.dumps({'experiment':'b-06','mode':'execute' if a.execute else 'dry-run','results':str(out),'count':len(rows),'statuses':{s:sum(x['status']==s for x in rows) for s in sorted({r['status'] for r in rows})},'repos':rows},indent=2)+'\n',encoding='utf-8')
+    (out/'summary.json').write_text(json.dumps({'experiment':'b-06','version':'v4','timezone':'America/Chicago','identity_audit':str(a.identity_audit) if a.identity_audit else None,'mode':'execute' if a.execute else 'dry-run','results':str(out),'count':len(rows),'statuses':{s:sum(x['status']==s for x in rows) for s in sorted({r['status'] for r in rows})},'repos':rows},indent=2)+'\n',encoding='utf-8')
     print('OUTPUT_DIR='+str(out))
     print('Note: candidate GitHub slugs are not verified historical RQ3 origin identities.')
     return 1 if any(r['status'] in ('CLONE_FAILED','FETCH_FAILED','BLOCKED_NON_GIT_DIRECTORY') for r in rows) else 0
