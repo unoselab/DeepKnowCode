@@ -75,10 +75,10 @@ def main():
     if a.show_dirs < 0: p.error('--show-dirs must be >= 0')
     root=a.root.resolve(); legacy=a.legacy_systems.resolve()
     if not legacy.is_dir():p.error('Legacy systems not found: '+str(legacy))
-    out=root/'results'/'b-06'/'identity-audit-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-%f')
+    out=root/'results'/'b-06'/('identity-audit-'+dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S-%f'))
     out.mkdir(parents=True,exist_ok=False)
     rows=[]
-    print('B-06 v2 | Legacy Source Repository Identity Audit | READ ONLY',flush=True)
+    print('B-06 v3 | Legacy Source Repository Identity Audit | READ ONLY',flush=True)
     print('LEGACY:',legacy,'\n')
     for name,slug in PROJECTS:
         path=legacy/name
@@ -107,7 +107,7 @@ def main():
     fields=list(rows[0]);csv_path=out/'repository_identity_audit.csv'
     with csv_path.open('w',newline='',encoding='utf-8') as f:
         w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(rows)
-    (out/'summary.json').write_text(json.dumps({'experiment':'b-06','version':'v2','mode':'identity-audit',
+    (out/'summary.json').write_text(json.dumps({'experiment':'b-06','version':'v3','mode':'identity-audit',
         'legacy_systems':str(legacy),'total':len(rows),
         'status_counts':{s:sum(r['review_status']==s for r in rows) for s in sorted({r['review_status'] for r in rows})},
         'results':str(out)},indent=2)+'\n')
