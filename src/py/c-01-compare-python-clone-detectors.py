@@ -280,7 +280,7 @@ def main():
     write_csv(out/'fallback_coverage.csv',coverage,
               ['file','python_ast_function_count','observed_in_ast_similar_report',
                'in_strict_fallback_pair','strict_fallback_pair_count'])
-    summary={'experiment':'C-01','version':'v2','created_utc':datetime.now(timezone.utc).isoformat(),
+    summary={'experiment':'C-01','version':'v3','created_utc':datetime.now(timezone.utc).isoformat(),
              'staged_files':len(manifest),'python_ast_errors':len(errors),'functions_indexed':len(index),
              'ni_parse_failed_files':len(failed),
              'nicad_raw_reports':ni_raw,'nicad_primary_unique_pairs':len(ni_pairs),
@@ -307,7 +307,7 @@ def main():
                  'Python AST indexing and NiCad function extraction need not have identical scope or semantics.'
              ]}
     (out/'summary.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-    report=f"""# C-01 v2 — Hybrid NiCad + jscpd AST Fallback
+    report=f"""# C-01 v3 — Hybrid NiCad + jscpd AST Fallback
 
 - Staged Python files: {len(manifest)}; functions indexed: {len(index)}; Python AST errors: {len(errors)}.
 - NiCad primary: {ni_raw} raw reports, **{len(ni_pairs)} unique mapped function pairs**.
