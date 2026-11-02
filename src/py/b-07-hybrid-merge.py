@@ -284,7 +284,7 @@ def main():
     write_csv(out/'fallback_coverage.csv',coverage,
               ['file','python_ast_function_count','observed_in_ast_similar_report',
                'in_strict_fallback_pair','strict_fallback_pair_count'])
-    summary={'experiment':'B-07','version':'v8','created_chicago':datetime.now(__import__('zoneinfo').ZoneInfo('America/Chicago')).isoformat(),
+    summary={'experiment':'B-07','version':'v9','created_chicago':datetime.now(__import__('zoneinfo').ZoneInfo('America/Chicago')).isoformat(),
              'staged_files':len(manifest),'python_ast_errors':len(errors),'functions_indexed':len(index),
              'ni_parse_failed_files':len(failed),
              'nicad_raw_reports':ni_raw,'nicad_primary_unique_pairs':len(ni_pairs),
