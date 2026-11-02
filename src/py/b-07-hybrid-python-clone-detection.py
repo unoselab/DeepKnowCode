@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""B-07 v4: non-destructive per-project NiCad + jscpd hybrid detection.
+"""B-07 v7: non-destructive per-project NiCad + jscpd hybrid detection.
 
 NiCad and per-file probes are serial and isolated via unique B-07 cache basename.
 """
@@ -55,6 +55,7 @@ def main():
     p.add_argument('--out',type=Path)
     p.add_argument('--per-file-timeout',type=int,default=100)
     p.add_argument('--max-files',type=int,default=0,help='pilot only; 0=full reproduction')
+    p.add_argument('--azure-cache-stage',help='Reuse the original Azure SDK staged source and extracted NiCad cache')
     p.add_argument('--skip-jscpd',action='store_true',help='detector infrastructure check only; skips hybrid merge')
     a=p.parse_args();root=a.root.resolve();manifest=a.manifest if a.manifest.is_absolute() else root/a.manifest
     if not manifest.is_file():p.error('Missing B-06 manifest: '+str(manifest))
@@ -74,40 +75,57 @@ def main():
     out=(a.out if a.out and a.out.is_absolute() else root/(a.out or Path('results/b-07')/stamp)).resolve()
     if out.exists():p.error('Output exists: '+str(out))
     out.mkdir(parents=True,exist_ok=False)
-    stage=out/'stage'/('b07'+stamp.replace('-',''))
-    stage.mkdir(parents=True)
-    stats=Counter();audit=[]
-    for src in sorted(repo.rglob('*.py')):
-        rel=src.relative_to(repo);stats['files_seen']+=1
-        if policy.test_file(rel):stats['files_excluded_by_path']+=1;continue
-        try:
-            source=src.read_text(encoding='utf-8');tree=ast.parse(source)
-        except (SyntaxError,UnicodeError,ValueError) as exc:
-            audit.append({'file':rel.as_posix(),'action':'skip_parse_error','detail':str(exc)[:250]});stats['files_excluded_parse_error']+=1;continue
-        lines=source.splitlines(keepends=True);spans=policy.masking_spans(tree,lines)
-        for start,end in spans:
-            if start>=len(lines):continue
-            indent=re.match(r'\s*',lines[start]).group().replace('\n','')
-            lines[start]=indent+'pass\n'
-            for i in range(start+1,min(end,len(lines))):lines[i]='\n'
-        output=''.join(lines)
-        try:ast.parse(output)
-        except SyntaxError as exc:
-            audit.append({'file':rel.as_posix(),'action':'skip_after_mask','detail':str(exc)[:250]});stats['files_excluded_after_mask_error']+=1;continue
-        dst=stage/rel;dst.parent.mkdir(parents=True,exist_ok=True);dst.write_text(output,encoding='utf-8')
-        stats['files_staged']+=1;stats['test_declarations_masked']+=len(spans)
-        if a.max_files and stats['files_staged']>=a.max_files:break
-    with (out/'filter_audit.csv').open('w',newline='',encoding='utf-8') as h:
-        w=csv.DictWriter(h,fieldnames=['file','action','detail']);w.writeheader();w.writerows(audit)
-    (out/'filter_summary.json').write_text(json.dumps({'counts':dict(stats),'commit':head,'stage':str(stage)},indent=2)+'\n')
-    print('Staged files:',stats['files_staged'],flush=True)
-    nicad=root/'tools/nicad-7.0.1-linux-x86_64';txl=root/'tools/opentxl-11.3.7-linux-x64'
-    if not (nicad/'bin/nicad').is_file() or not (txl/'bin/txl').is_file():p.error('NiCad/OpenTxl installation missing')
-    env=os.environ.copy();env['PATH']=str(txl/'bin')+os.pathsep+env.get('PATH','')
-    cache=nicad/'nicadclones'/stage.name
-    if cache.exists() or cache.is_symlink():p.error('NiCad unique cache unexpectedly already exists: '+str(cache))
-    # NiCad is not safe to run concurrently against same installation. Shell wrapper takes flock.
-    run([nicad/'bin/nicad','functions','py',stage,'default'],out/'nicad.log',cwd=nicad,env=env)
+    if a.azure_cache_stage:
+        if a.project!='azure-sdk-for-python':p.error('--azure-cache-stage only supports Azure SDK')
+        if not re.fullmatch(r'b07[0-9]{20,}',a.azure_cache_stage):p.error('Invalid stage identifier')
+        stage=root/'results/b-07/20261101-233558-899054/projects/azure-sdk-for-python/stage'/a.azure_cache_stage
+        if not stage.is_dir():p.error('Original Azure staging missing: '+str(stage))
+        stats=Counter(files_staged=len(list(stage.rglob('*.py'))))
+        if stats['files_staged']!=34834:p.error('Staging file count mismatch: '+str(stats['files_staged']))
+        nicad=root/'tools/nicad-7.0.1-linux-x86_64';txl=root/'tools/opentxl-11.3.7-linux-x64'
+        env=os.environ.copy();env['PATH']=str(txl/'bin')+os.pathsep+env.get('PATH','')
+        cache=nicad/'nicadclones'/a.azure_cache_stage
+        source=cache/(a.azure_cache_stage+'_functions.xml')
+        if not source.is_file():p.error('Original extraction cache missing')
+        if not (cache/(a.azure_cache_stage+'_functions-blind.xml')).is_file():p.error('Run chunked renaming first')
+        (out/'filter_summary.json').write_text(json.dumps({'counts':dict(stats),'commit':head,'stage':str(stage),'reused':True},indent=2)+'\n')
+        print('Reused staged files:',stats['files_staged'],flush=True)
+        run([nicad/'bin/nicad','functions','py',stage,'default'],out/'nicad.log',cwd=nicad,env=env)
+    else:
+        stage=out/'stage'/('b07'+stamp.replace('-',''))
+        stage.mkdir(parents=True)
+        stats=Counter();audit=[]
+        for src in sorted(repo.rglob('*.py')):
+            rel=src.relative_to(repo);stats['files_seen']+=1
+            if policy.test_file(rel):stats['files_excluded_by_path']+=1;continue
+            try:
+                source=src.read_text(encoding='utf-8');tree=ast.parse(source)
+            except (SyntaxError,UnicodeError,ValueError) as exc:
+                audit.append({'file':rel.as_posix(),'action':'skip_parse_error','detail':str(exc)[:250]});stats['files_excluded_parse_error']+=1;continue
+            lines=source.splitlines(keepends=True);spans=policy.masking_spans(tree,lines)
+            for start,end in spans:
+                if start>=len(lines):continue
+                indent=re.match(r'\s*',lines[start]).group().replace('\n','')
+                lines[start]=indent+'pass\n'
+                for i in range(start+1,min(end,len(lines))):lines[i]='\n'
+            output=''.join(lines)
+            try:ast.parse(output)
+            except SyntaxError as exc:
+                audit.append({'file':rel.as_posix(),'action':'skip_after_mask','detail':str(exc)[:250]});stats['files_excluded_after_mask_error']+=1;continue
+            dst=stage/rel;dst.parent.mkdir(parents=True,exist_ok=True);dst.write_text(output,encoding='utf-8')
+            stats['files_staged']+=1;stats['test_declarations_masked']+=len(spans)
+            if a.max_files and stats['files_staged']>=a.max_files:break
+        with (out/'filter_audit.csv').open('w',newline='',encoding='utf-8') as h:
+            w=csv.DictWriter(h,fieldnames=['file','action','detail']);w.writeheader();w.writerows(audit)
+        (out/'filter_summary.json').write_text(json.dumps({'counts':dict(stats),'commit':head,'stage':str(stage)},indent=2)+'\n')
+        print('Staged files:',stats['files_staged'],flush=True)
+        nicad=root/'tools/nicad-7.0.1-linux-x86_64';txl=root/'tools/opentxl-11.3.7-linux-x64'
+        if not (nicad/'bin/nicad').is_file() or not (txl/'bin/txl').is_file():p.error('NiCad/OpenTxl installation missing')
+        env=os.environ.copy();env['PATH']=str(txl/'bin')+os.pathsep+env.get('PATH','')
+        cache=nicad/'nicadclones'/stage.name
+        if cache.exists() or cache.is_symlink():p.error('NiCad unique cache unexpectedly already exists: '+str(cache))
+        # NiCad is not safe to run concurrently against same installation. Shell wrapper takes flock.
+        run([nicad/'bin/nicad','functions','py',stage,'default'],out/'nicad.log',cwd=nicad,env=env)
     xmls=sorted(cache.rglob('*functions-blind-clones-0.30.xml'))
     if len(xmls)!=1:raise RuntimeError('Expected exactly one pair-level NiCad XML under '+str(cache)+', got '+str(xmls))
     xml_dir=out/'nicad_xml';xml_dir.mkdir();xml=xml_dir/xmls[0].name;shutil.copy2(xmls[0],xml)
@@ -147,11 +165,11 @@ def main():
     actual={k:summary.get(k) for k in REFERENCE if k!='jscpd_raw_duplicates'}
     actual['jscpd_raw_duplicates']=rawjs
     checks={k:{'reference':expected,'actual':actual.get(k),'match':actual.get(k)==expected} for k,expected in REFERENCE.items()} if a.project=='salt' else {}
-    result={'experiment':'b-07','version':'v4','project':a.project,'timezone':'America/Chicago','timestamp':datetime.now(ZoneInfo('America/Chicago')).isoformat(),'git_commit':head,'remote':remote,'manifest':str(manifest),'settings':{'nicad':'functions py default','jscpd':'5.4.2; python; similarity 0.70; min-lines 10; min-tokens 50; json','probe':'per-file NiCad functions py default'},'metrics':actual,'checks':checks,'all_reference_counts_match':all(x['match'] for x in checks.values()) if checks else None,'limitations':['Count agreement alone does not prove pair-level equality.','C-01 original staged source was not available for bytewise comparison in this run.','Per-file NiCad probing is slow and can yield differing outcome from project-wide parsing.']}
+    result={'experiment':'b-07','version':'v8','project':a.project,'timezone':'America/Chicago','timestamp':datetime.now(ZoneInfo('America/Chicago')).isoformat(),'git_commit':head,'remote':remote,'manifest':str(manifest),'settings':{'nicad':'functions py default','jscpd':'5.4.2; python; similarity 0.70; min-lines 10; min-tokens 50; json','probe':'per-file NiCad functions py default'},'metrics':actual,'checks':checks,'all_reference_counts_match':all(x['match'] for x in checks.values()) if checks else None,'limitations':['Count agreement alone does not prove pair-level equality.','C-01 original staged source was not available for bytewise comparison in this run.','Per-file NiCad probing is slow and can yield differing outcome from project-wide parsing.']}
     (out/'reproduction_comparison.json').write_text(json.dumps(result,indent=2)+'\n')
     for k,v in checks.items():print(f'{k}: reference={v["reference"]} actual={v["actual"]} match={v["match"]}')
     # This is written only after the full NiCad, parse audit, jscpd and merge pipeline succeeds.
-    done={'status':'COMPLETED','project':a.project,'commit':head,'remote':remote,'version':'v4','settings':result['settings'],'metrics':actual,'reference_match':result['all_reference_counts_match'],'completed_at':datetime.now(ZoneInfo('America/Chicago')).isoformat()}
+    done={'status':'COMPLETED','project':a.project,'commit':head,'remote':remote,'version':'v8','settings':result['settings'],'metrics':actual,'reference_match':result['all_reference_counts_match'],'completed_at':datetime.now(ZoneInfo('America/Chicago')).isoformat()}
     (out/'project_run.json').write_text(json.dumps(done,indent=2)+'\n')
     print('B-07 DONE:',out,'ALL_MATCH=',result['all_reference_counts_match'])
 
