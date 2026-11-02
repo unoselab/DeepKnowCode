@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""C-01: read-only, conservative comparison of NiCad and jscpd on staged Salt code."""
+"""B-07 v4: conservative NiCad/jscpd hybrid merge with iterative AST indexing."""
 import argparse
 import ast
 import csv
@@ -97,27 +97,27 @@ def collect_functions(pyfiles, stage):
         except (SyntaxError, UnicodeError, ValueError) as exc:
             errors.append({'file': rel, 'error': str(exc)[:500]})
             continue
-        class Visitor(ast.NodeVisitor):
-            def __init__(self):
-                self.scope = []
-            def visit_ClassDef(self, n):
-                self.scope.append(n.name)
-                self.generic_visit(n)
-                self.scope.pop()
-            def visit_FunctionDef(self, n):
-                self.add(n)
-            def visit_AsyncFunctionDef(self, n):
-                self.add(n)
-            def add(self, n):
-                beginning = min([n.lineno] + [d.lineno for d in n.decorator_list])
-                obj = {'file': rel, 'start': beginning, 'end': n.end_lineno,
-                       'name': '.'.join(self.scope + [n.name]),
-                       'type': 'async' if isinstance(n, ast.AsyncFunctionDef) else 'sync'}
+        # Iterative preorder traversal prevents RecursionError on deeply nested ASTs.
+        # Preserve v3 NodeVisitor semantics: collect definitions in preorder;
+        # nested function and class names become scope components.
+        stack = [(tree, ())]
+        while stack:
+            node, scope = stack.pop()
+            child_scope = scope
+            if isinstance(node, ast.ClassDef):
+                child_scope = scope + (node.name,)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                beginning = min([node.lineno] + [d.lineno for d in node.decorator_list])
+                obj = {'file': rel, 'start': beginning, 'end': node.end_lineno,
+                       'name': '.'.join(scope + (node.name,)),
+                       'type': 'async' if isinstance(node, ast.AsyncFunctionDef) else 'sync'}
                 by_file[rel].append(obj)
-                self.scope.append(n.name)
-                self.generic_visit(n)
-                self.scope.pop()
-        Visitor().visit(tree)
+                child_scope = scope + (node.name,)
+            # ast.iter_child_nodes returns children in NodeVisitor.generic_visit order.
+            # Reverse push order to preserve that same preorder ordering.
+            children = list(ast.iter_child_nodes(node))
+            for child in reversed(children):
+                stack.append((child, child_scope))
     return manifest, by_file, errors
 
 
@@ -284,7 +284,7 @@ def main():
     write_csv(out/'fallback_coverage.csv',coverage,
               ['file','python_ast_function_count','observed_in_ast_similar_report',
                'in_strict_fallback_pair','strict_fallback_pair_count'])
-    summary={'experiment':'B-07','version':'v1','created_chicago':datetime.now(__import__('zoneinfo').ZoneInfo('America/Chicago')).isoformat(),
+    summary={'experiment':'B-07','version':'v4','created_chicago':datetime.now(__import__('zoneinfo').ZoneInfo('America/Chicago')).isoformat(),
              'staged_files':len(manifest),'python_ast_errors':len(errors),'functions_indexed':len(index),
              'ni_parse_failed_files':len(failed),
              'nicad_raw_reports':ni_raw,'nicad_primary_unique_pairs':len(ni_pairs),

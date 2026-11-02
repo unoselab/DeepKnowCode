@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""B-07 v3 project orchestrator: isolate, audit and resume completed projects."""
+"""B-07 v4 project orchestrator: isolate, audit and resume completed projects."""
 import argparse,csv,json,subprocess,sys,hashlib,os
 from pathlib import Path
 from datetime import datetime
@@ -20,7 +20,7 @@ def existing_success(root,project,record):
         if p.parent.name!=project:continue
         try:
             d=json.loads(p.read_text())
-            if all([d.get('status')=='COMPLETED',d.get('project')==project,d.get('commit')==record['commit'],d.get('remote','').rstrip('/').removesuffix('.git').lower()==record['remote'].rstrip('/').removesuffix('.git').lower(),d.get('version')=='v3',d.get('settings')==SETTINGS,(p.parent/'hybrid/hybrid_function_clone_pairs.csv').is_file(),(p.parent/'hybrid/summary.json').is_file(),(p.parent/'jscpd/jscpd-report.json').is_file(),(p.parent/'file_parse_audit.csv').is_file()]):return str(p.parent)
+            if all([d.get('status')=='COMPLETED',d.get('project')==project,d.get('commit')==record['commit'],d.get('remote','').rstrip('/').removesuffix('.git').lower()==record['remote'].rstrip('/').removesuffix('.git').lower(),d.get('version')=='v4',d.get('settings')==SETTINGS,(p.parent/'hybrid/hybrid_function_clone_pairs.csv').is_file(),(p.parent/'hybrid/summary.json').is_file(),(p.parent/'jscpd/jscpd-report.json').is_file(),(p.parent/'file_parse_audit.csv').is_file()]):return str(p.parent)
         except (OSError,ValueError,KeyError):pass
     return None
 def main():
