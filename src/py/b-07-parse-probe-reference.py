@@ -9,10 +9,24 @@ COMMIT='0fa7bec68485f8d89b7de2bd6b8743d040fb956b'
 FIELDS=['file','python_ast','python_error','nicad_status','nicad_failed_count','nicad_extracted_functions','nicad_exit','nicad_error_excerpt','size_bytes']
 
 def safe_delete(path, expected_parent):
-    path=Path(path); parent=Path(expected_parent).resolve()
-    if path.is_symlink() or path.parent.resolve()!=parent or path.name!='b02_probe':
-        raise RuntimeError('Unsafe cache delete refused: '+str(path))
-    if path.exists():shutil.rmtree(path)
+    """Delete only the two known NiCad per-file probe cache directories.
+
+    Never delete the NiCad project-wide cache, an arbitrary directory, or
+    anything accessed through symlinks.  The B-07 shell wrapper serializes
+    NiCad access with flock before any probe is run.
+    """
+    path = Path(path)
+    parent = Path(expected_parent).resolve(strict=True)
+    if parent.name != 'nicadclones' or not parent.is_dir():
+        raise RuntimeError('Unexpected NiCad cache parent: ' + str(parent))
+    if path.name not in {'b02_probe', 'b07_probe'}:
+        raise RuntimeError('Unsafe cache delete refused: ' + str(path))
+    if path.is_symlink() or path.parent.resolve(strict=True) != parent:
+        raise RuntimeError('Unsafe cache delete refused: ' + str(path))
+    if path.exists():
+        if not path.is_dir():
+            raise RuntimeError('Non-directory probe cache refused: ' + str(path))
+        shutil.rmtree(path)
 
 def get_count(s, regex):
     matches=re.findall(regex,s,flags=re.IGNORECASE)

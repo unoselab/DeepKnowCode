@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""B-07 v1: non-destructive Salt reproduction of C-01 hybrid detection.
+"""B-07 v3: non-destructive per-project NiCad + jscpd hybrid detection.
 
 NiCad and per-file probes are serial and isolated via unique B-07 cache basename.
 """
@@ -49,7 +49,7 @@ def run(cmd, log_path, cwd=None, env=None, timeout=None):
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--project',default='salt',choices=['salt'],help='v1 deliberately limits fresh reproduction to salt')
+    p.add_argument('--project',required=True,help='Project from B-06 repository manifest')
     p.add_argument('--root',type=Path,default=HERE.parents[1])
     p.add_argument('--manifest',type=Path,default=Path('results/b-06/20261101-161810-903689/repository_manifest.csv'))
     p.add_argument('--out',type=Path)
@@ -65,7 +65,7 @@ def main():
     if not (repo/'.git').exists():p.error('Git repository missing: '+str(repo))
     head=subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
     if head!=m['commit']:p.error('HEAD differs from B-06 manifest; refusing to continue')
-    if head!=EXPECTED['salt']:p.error('Salt commit differs from C-01 reference; not a controlled reproduction')
+    if a.project=='salt' and head!=EXPECTED['salt']:p.error('Salt commit differs from C-01 reference; not a controlled reproduction')
     remote=subprocess.check_output(['git','-C',str(repo),'remote','get-url','origin'],text=True).strip()
     if remote.rstrip('/').removesuffix('.git').lower()!=m['remote'].rstrip('/').removesuffix('.git').lower():p.error('Remote mismatch')
     status=subprocess.check_output(['git','-C',str(repo),'status','--porcelain'],text=True).strip()
@@ -146,10 +146,13 @@ def main():
     rawjs=len(json.loads(jsfile.read_text()).get('duplicates',[]))
     actual={k:summary.get(k) for k in REFERENCE if k!='jscpd_raw_duplicates'}
     actual['jscpd_raw_duplicates']=rawjs
-    checks={k:{'reference':expected,'actual':actual.get(k),'match':actual.get(k)==expected} for k,expected in REFERENCE.items()}
-    result={'experiment':'b-07','version':'v1','project':a.project,'timezone':'America/Chicago','timestamp':datetime.now(ZoneInfo('America/Chicago')).isoformat(),'git_commit':head,'remote':remote,'manifest':str(manifest),'settings':{'nicad':'functions py default','jscpd':'5.4.2; python; similarity 0.70; min-lines 10; min-tokens 50; json','probe':'per-file NiCad functions py default'},'checks':checks,'all_reference_counts_match':all(x['match'] for x in checks.values()),'limitations':['Count agreement alone does not prove pair-level equality.','C-01 original staged source was not available for bytewise comparison in this run.','Per-file NiCad probing is slow and can yield differing outcome from project-wide parsing.']}
+    checks={k:{'reference':expected,'actual':actual.get(k),'match':actual.get(k)==expected} for k,expected in REFERENCE.items()} if a.project=='salt' else {}
+    result={'experiment':'b-07','version':'v3','project':a.project,'timezone':'America/Chicago','timestamp':datetime.now(ZoneInfo('America/Chicago')).isoformat(),'git_commit':head,'remote':remote,'manifest':str(manifest),'settings':{'nicad':'functions py default','jscpd':'5.4.2; python; similarity 0.70; min-lines 10; min-tokens 50; json','probe':'per-file NiCad functions py default'},'metrics':actual,'checks':checks,'all_reference_counts_match':all(x['match'] for x in checks.values()) if checks else None,'limitations':['Count agreement alone does not prove pair-level equality.','C-01 original staged source was not available for bytewise comparison in this run.','Per-file NiCad probing is slow and can yield differing outcome from project-wide parsing.']}
     (out/'reproduction_comparison.json').write_text(json.dumps(result,indent=2)+'\n')
     for k,v in checks.items():print(f'{k}: reference={v["reference"]} actual={v["actual"]} match={v["match"]}')
+    # This is written only after the full NiCad, parse audit, jscpd and merge pipeline succeeds.
+    done={'status':'COMPLETED','project':a.project,'commit':head,'remote':remote,'version':'v3','settings':result['settings'],'metrics':actual,'reference_match':result['all_reference_counts_match'],'completed_at':datetime.now(ZoneInfo('America/Chicago')).isoformat()}
+    (out/'project_run.json').write_text(json.dumps(done,indent=2)+'\n')
     print('B-07 DONE:',out,'ALL_MATCH=',result['all_reference_counts_match'])
 
 if __name__=='__main__':

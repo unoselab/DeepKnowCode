@@ -8,5 +8,5 @@ command -v flock >/dev/null || { echo 'flock missing' >&2; exit 2; }
 exec 9>"$ROOT/logs/b-07/nicad.lock"
 flock -n 9 || { echo 'Another B-07 NiCad process is active' >&2; exit 6; }
 PYTHON_BIN="${PYTHON_BIN:-python}"
-"$PYTHON_BIN" -u "$ROOT/src/py/b-07-hybrid-python-clone-detection.py" --root "$ROOT" "$@" 2>&1 | tee "$LOG"
+"$PYTHON_BIN" -u "$ROOT/src/py/b-07-multi-project.py" --root "$ROOT" "$@" 2>&1 | tee "$LOG"
 exit "${PIPESTATUS[0]}"
