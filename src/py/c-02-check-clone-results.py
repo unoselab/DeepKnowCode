@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""C-02 v1: independent, read-only audit of C-01 results and optional B-07 reference."""
+"""C-02 v2: independent, read-only audit of C-01 results and optional B-07 reference."""
 import argparse
 import csv
 import hashlib
@@ -99,13 +99,22 @@ def main():
         if item:
             for record in item['pair_files'].values():record.pop('_keys',None)
     findings=current['findings'] + (['B07_'+s for s in reference['findings']] if reference else [])
-    status='PASS' if not findings else 'FAIL'
-    report={'experiment':'C-02','version':'v1','status':status,
+    internal_status='PASS' if not current['findings'] else 'FAIL'
+    reference_status='NOT_REQUESTED' if not reference else ('PASS' if not reference['findings'] else 'FAIL')
+    reproduction_status=('NOT_REQUESTED' if not reference else
+                         ('PASS' if reference_status=='PASS' and all(v.get('exact_equal') is True for v in comparisons.values()) and len(comparisons)==len(KINDS) else 'MISMATCH'))
+    status='PASS' if internal_status=='PASS' and reference_status in ('PASS','NOT_REQUESTED') and reproduction_status in ('PASS','NOT_REQUESTED') else 'FAIL'
+    if reproduction_status=='MISMATCH': findings.append('PAIR_REPRODUCTION_MISMATCH')
+    report={'experiment':'C-02','version':'v2','status':status,
             'created_at_chicago':datetime.now(ZoneInfo('America/Chicago')).isoformat(),
+            'internal_audit_status':internal_status, 'reference_audit_status':reference_status,
+            'reproduction_status':reproduction_status,
             'c01':current,'b07':reference,'pair_comparison':comparisons,
             'findings':findings,'note':'C-02 reads results only. It does not perform clone detection or alter source results. Exact pair equality needs matching source scope and commits.'}
     output.mkdir(parents=True)
     (output/'audit.json').write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
-    print(json.dumps({'status':status,'output':str(output),'findings':findings,'pair_comparison':comparisons},indent=2))
+    print(json.dumps({'status':status, 'internal_audit_status':internal_status,
+                      'reproduction_status':reproduction_status,
+                      'output':str(output),'findings':findings,'pair_comparison':comparisons},indent=2))
     return 0 if status=='PASS' else 2
 if __name__=='__main__':sys.exit(main())
