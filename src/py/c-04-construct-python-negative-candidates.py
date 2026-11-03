@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""C-04 v2: non-destructive candidate negatives and dataset audits; NOT training approval."""
+"""C-04 v3: component-aware resplit, provenance reconciliation, candidate negatives."""
 import argparse
 import csv
 import hashlib
@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = 'v2'
+VERSION = 'v3'
 
 def sha(s):
     return hashlib.sha256(s.encode('utf-8')).hexdigest()
@@ -55,22 +55,38 @@ def pair_rows(path, ids):
             seen.add(pair);result.append(pair)
     return result
 
-def provenance_map(path):
+def provenance_map(path, positives):
+    """Reconcile C-03 provenance against its *post-deduplication* pair files.
+
+    C-03 writes provenance before code-hash pair deduplication; unmatched rows
+    must be excluded from C-04 output, not treated as a fatal error.  Retain
+    every row corresponding to a surviving positive pair (including multiple
+    detector reports for that pair).  Audit the excluded records.
+    """
     id_projects=defaultdict(set); pair_project={}; detector=Counter()
+    kept=[]; excluded=Counter()
     with path.open(newline='',encoding='utf-8-sig') as f:
         reader=csv.DictReader(f)
+        columns=list(reader.fieldnames or [])
         needed={'id_a','id_b','project','source'}
-        if not needed.issubset(reader.fieldnames or []):raise ValueError('Missing C-03 provenance fields')
+        if not needed.issubset(columns):raise ValueError('Missing C-03 provenance fields')
+        if 'c04_split' in columns:raise ValueError('Unexpected c04_split in C-03 provenance')
         for row in reader:
             a,b=row['id_a'],row['id_b'];project=row['project']
-            if not project:raise ValueError('Empty provenance project')
+            if not a or not b or not project:raise ValueError('Empty C-03 provenance endpoint/project')
             pair=tuple(sorted((a,b)))
+            if pair not in positives:
+                excluded['not_in_final_c03_positive_pairs']+=1
+                continue
             if pair in pair_project and pair_project[pair]!=project:
                 raise ValueError('Pair assigned to multiple projects')
             pair_project[pair]=project
             id_projects[a].add(project);id_projects[b].add(project)
             detector[row['source']]+=1
-    return id_projects,pair_project,detector
+            kept.append(row)
+    missing=positives-set(pair_project)
+    if missing:raise ValueError(f'{len(missing)} positive pairs missing provenance')
+    return id_projects,pair_project,detector,columns,kept,dict(excluded)
 
 def component_split(positive_pairs, code_hash, norm_hash, ratio, seed):
     """Group positive connectivity and identical content before any split assignment.
@@ -189,9 +205,8 @@ def generate(args):
     original_train_ids={n for p in train for n in p}
     original_valid_ids={n for p in valid for n in p}
     original_overlap=len(original_train_ids&original_valid_ids)
-    id_projects, pair_project, sources=provenance_map(inp/'positive_provenance.csv')
-    unassigned=[p for p in positives if p not in pair_project]
-    if unassigned:raise ValueError(f'{len(unassigned)} positive pairs missing provenance')
+    id_projects, pair_project, sources, provenance_cols, provenance_rows, excluded_provenance=provenance_map(
+        inp/'positive_provenance.csv', positives)
     all_ids={i for p in positives for i in p}
     ambiguous=[i for i in all_ids if len(id_projects.get(i,set()))!=1]
     if ambiguous:raise ValueError(f'Project attribution is ambiguous for {len(ambiguous)} IDs')
@@ -269,7 +284,10 @@ def generate(args):
              'train_valid_exact_function_hash_overlap':cross_exact,'train_valid_normalized_function_hash_overlap':cross_norm,
              'heldout_exact_or_normalized_function_matches':len(heldout_hit),'heldout_test_source_hashes':heldout_files,
              'repository_count':len({next(iter(id_projects[i])) for i in train_ids|valid_ids}),
-             'detector_sources':dict(sources),'negative_sampling_rejections':dict(rejected),
+             'detector_sources':dict(sources),'positive_provenance_kept_rows':len(provenance_rows),
+             'positive_provenance_excluded_rows':sum(excluded_provenance.values()),
+             'positive_provenance_exclusion_reasons':excluded_provenance,
+             'negative_sampling_rejections':dict(rejected),
              'ratio_requested':args.ratio,'seed':args.seed,'jaccard_max':args.jaccard_max,
              'min_length_ratio':args.min_length_ratio,
              'warnings':['Every negative is a heuristic candidate, NOT a verified non-clone.',
@@ -304,18 +322,13 @@ def generate(args):
     with (out/'negative_candidates.csv').open('w',newline='',encoding='utf-8') as f:
         writer=csv.DictWriter(f,fieldnames=['split','id_a','id_b','project','label','verification','selection','source_positive_graph'])
         writer.writeheader();writer.writerows(neg_provenance)
-    # Keep detector and repository provenance aligned to the NEW component split.
-    source_prov=inp/'positive_provenance.csv'
-    with source_prov.open('r',newline='',encoding='utf-8-sig') as src, \
-         (out/'positive_provenance.csv').open('w',newline='',encoding='utf-8') as dst:
-        reader=csv.DictReader(src)
-        columns=list(reader.fieldnames or [])
-        if 'c04_split' in columns:raise ValueError('Unexpected c04_split in C-03 provenance')
-        writer=csv.DictWriter(dst,fieldnames=columns+['c04_split'])
+    # Input C-03 provenance can contain rows for code-hash-deduplicated pairs.
+    # Only surviving positive pairs are emitted, with the *new* C-04 split.
+    with (out/'positive_provenance.csv').open('w',newline='',encoding='utf-8') as dst:
+        writer=csv.DictWriter(dst,fieldnames=provenance_cols+['c04_split'])
         writer.writeheader()
-        for record in reader:
-            pair=tuple(sorted((record['id_a'],record['id_b'])))
-            if pair not in positives:raise ValueError('Unrecognized positive provenance row')
+        for record in provenance_rows:
+            record=dict(record)
             record['c04_split']=assignment[record['id_a']]
             writer.writerow(record)
     (out/'audit.json').write_text(json.dumps(summary,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
