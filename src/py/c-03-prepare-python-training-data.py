@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""C-03 v1: read-only C-01 hybrid extraction into A-08-compatible training candidates."""
+"""C-03 v2: read-only C-01 hybrid extraction into A-08-compatible training candidates."""
 import argparse
 import ast
 import csv
@@ -12,7 +12,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 import subprocess
 
-VERSION = 'v1'
+VERSION = 'v2'
 FIELDS = ('file_a', 'start_a', 'end_a', 'function_a', 'file_b', 'start_b', 'end_b', 'function_b', 'source')
 
 def digest_text(s):
@@ -86,6 +86,85 @@ def read_repo(root, meta, check_commit=True):
         if head!=meta['commit']:raise ValueError(f'Commit mismatch for {project}: {head} != {meta["commit"]}')
     return repo
 
+def read_commit_source(repo, rel, commit, cache, audits):
+    """Read committed source, resolving only Git-tracked, repo-contained symlinks.
+
+    Git symlinks (mode 120000) store their relative target as blob content.
+    Never follow working-tree symlinks or accept an uncommitted replacement.
+    """
+    from pathlib import PurePosixPath
+
+    requested = PurePosixPath(rel.as_posix())
+    if requested.is_absolute() or '..' in requested.parts or not requested.parts or '.' in requested.parts:
+        raise ValueError(f'Unsafe source path: {rel}')
+    if requested in cache:
+        return cache[requested]
+
+    def lookup(entry_path, seen):
+        if entry_path in seen:
+            raise ValueError(f'Git symlink cycle: {entry_path}')
+        if len(seen) >= 20:
+            raise ValueError(f'Git symlink chain too deep: {entry_path}')
+        entry = subprocess.run(
+            ['git', '-C', str(repo), 'ls-tree', commit, '--', entry_path.as_posix()],
+            capture_output=True, text=True, check=True)
+        rows = [line for line in entry.stdout.splitlines()
+                if line.endswith('\t' + entry_path.as_posix())]
+        if len(rows) != 1:
+            raise ValueError(f'Source absent from pinned Git commit: {entry_path} (commit={commit})')
+        meta = rows[0].split('\t', 1)[0].split()
+        if len(meta) != 3:
+            raise ValueError(f'Unexpected git ls-tree entry: {entry_path}')
+        mode, objtype, blobid = meta
+        if objtype != 'blob' or mode not in ('100644', '100755', '120000'):
+            raise ValueError(f'Unsupported Git source type: {entry_path}, mode={mode}')
+        raw = subprocess.run(
+            ['git', '-C', str(repo), 'cat-file', 'blob', blobid],
+            capture_output=True, check=True).stdout
+        if mode != '120000':
+            return raw, entry_path
+        try:
+            target = raw.decode('utf-8')
+        except UnicodeDecodeError as exc:
+            raise ValueError(f'Non-UTF-8 Git symlink target: {entry_path}') from exc
+        if not target or '\x00' in target or '\n' in target or '\r' in target or target.startswith('/') or '\\' in target:
+            raise ValueError(f'Unsafe Git symlink target: {entry_path} -> {target!r}')
+        # Normalize POSIX relative path *inside the Git tree*, not on the worktree.
+        parts = list(entry_path.parts[:-1])
+        for part in target.split('/'):
+            if part in ('', '.'):continue
+            if part == '..':
+                if not parts:
+                    raise ValueError(f'Git symlink escapes repository: {entry_path} -> {target!r}')
+                parts.pop()
+            else:
+                parts.append(part)
+        if not parts:
+            raise ValueError(f'Git symlink target is repository root: {entry_path}')
+        resolved = PurePosixPath(*parts)
+        audits['git_symlink_resolutions'] += 1
+        return lookup(resolved, seen | {entry_path})
+
+    blob, resolved = lookup(requested, set())
+    try:
+        content = blob.decode('utf-8-sig').splitlines(keepends=True)
+    except UnicodeDecodeError as exc:
+        raise ValueError(f'Git source is not UTF-8: {resolved}') from exc
+    # Worktree differences are observational only; committed blobs are authoritative.
+    worktree_path = repo.joinpath(*requested.parts)
+    if worktree_path.is_symlink():
+        audits['git_symlink_source_paths'] += 1
+    elif worktree_path.is_file():
+        try:
+            if worktree_path.read_bytes() != blob:
+                audits['worktree_differs_from_pinned_commit'] += 1
+        except OSError:
+            pass
+    else:
+        audits['source_loaded_from_git_blob_missing_worktree'] += 1
+    cache[requested] = content
+    return content
+
 def build(args):
     root=args.root.resolve()
     output=(args.output if args.output.is_absolute() else root/args.output).resolve()
@@ -108,12 +187,9 @@ def build(args):
                 record_count+=1; end_ids=[]; excluded=False
                 for s in ('a','b'):
                     rel=Path(row['file_'+s]); raw=repo/rel
-                    if rel.is_absolute() or '..' in rel.parts or not within(raw.resolve(),repo):raise ValueError('Unsafe source path: '+str(rel))
-                    if raw not in cache:
-                        if not raw.is_file() or raw.is_symlink():raise ValueError('Missing/unsafe source file: '+str(raw))
-                        cache[raw]=raw.read_text(encoding='utf-8-sig').splitlines(keepends=True)
+                    lines=read_commit_source(repo,rel,meta['commit'],cache,audits)
                     start,end=int(row['start_'+s]),int(row['end_'+s])
-                    code=get_function(cache[raw],raw,start,end)
+                    code=get_function(lines,raw,start,end)
                     key=(meta['project'],rel.as_posix(),start,end)
                     h=digest_text(code)
                     if h in tests or normalized_hash(code) in tests: excluded=True
@@ -193,7 +269,7 @@ def build(args):
                  'positives':{'train':len(train_pos),'validation':len(val_pos)},
                  'unverified_negative_candidates':{'train':len(train_neg),'validation':len(val_neg)},
                  'negative_candidate_warning':'Unreported pairs are NOT validated non-clones; do not train without human/independent review',
-                 'heldout_test_hash_check':test_details,'counts':dict(audits),'project_runs':project_info,
+                 'heldout_test_hash_check':test_details,'counts':dict(audits),'project_runs':project_info,'source_policy':'Pinned Git blob at project_run.json commit; no path guessing or uncommitted worktree content',
                  'seed':args.seed,'validation_fraction_requested':args.validation_fraction,
                  'existing_python_mixed_legacy_preserved':True,
                  'warning':'Project-level test leakage risk: C-01 repositories may overlap held-out test projects; exact function-code exclusion is not project-disjoint verification.'}
