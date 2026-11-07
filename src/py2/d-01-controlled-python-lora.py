@@ -196,7 +196,6 @@ def train(args,run,approval_file,hashes):
         if digest(prepared/name)!=value:raise ValueError(f'Prepared data hash changed: {name}')
     if (run/'adapter').exists():raise ValueError('Adapter output already exists')
     import torch
-    from datasets import Dataset
     from transformers import (AutoModelForCausalLM, Trainer,TrainingArguments,
                               DataCollatorForSeq2Seq,BitsAndBytesConfig)
     from peft import LoraConfig,get_peft_model,prepare_model_for_kbit_training,PeftModel,TaskType
@@ -204,13 +203,26 @@ def train(args,run,approval_file,hashes):
     world=int(os.environ.get('WORLD_SIZE','1'))
     if world!=args.expected_world_size:raise ValueError(f'Expected {args.expected_world_size} DDP workers; got {world}')
     local_rank=int(os.environ.get('LOCAL_RANK','0'))
+    class PreparedTorchDataset(torch.utils.data.Dataset):
+        """In-memory torch Dataset; avoids unnecessary Hugging Face datasets dependency."""
+        def __init__(self, items):
+            self.items = items
+
+        def __len__(self):
+            return len(self.items)
+
+        def __getitem__(self, index):
+            return self.items[index]
+
     def load_prepared(name):
         items=[]
         for line in (prepared/f'{name}.jsonl').open(encoding='utf-8'):
             ob=json.loads(line); items.append({'input_ids':ob['input_ids'],
                  'attention_mask':[1]*len(ob['input_ids']),
                  'labels':[-100]*(len(ob['input_ids'])-1)+[ob['input_ids'][-1]]})
-        return Dataset.from_list(items)
+        if not items:
+            raise ValueError(f"No prepared training samples in {name}")
+        return PreparedTorchDataset(items)
     train_ds=load_prepared('train'); val_ds=load_prepared('valid')
     tok=tokenizer_for(args)
     use_bf16=torch.cuda.is_bf16_supported()
