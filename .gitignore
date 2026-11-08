@@ -41,5 +41,6 @@ xrun.sh
 ylog.txt
 
 # Local evaluation datasets
-/data/
+data
+models
 tools
