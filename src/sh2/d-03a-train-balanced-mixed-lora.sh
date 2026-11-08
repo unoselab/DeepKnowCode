@@ -1,8 +1,42 @@
 #!/usr/bin/env bash
-# Standalone D-03 v5 M2 launcher. Never invokes any other shell wrapper.
+# Standalone D-03a v6 M2 launcher. Never invokes any other shell wrapper.
+# 
+# ============================================================
+# D-03a v6 — M2 Balanced Multilingual Training
+# ============================================================
+# 
+# Step 1. Prepare dataset (COMPLETED)
+# python src/py2/d-03a-train-balanced-mixed-lora.py prepare \
+#   --run-dir results/d-03a/prepare-20261107-v6 \
+#   --initial-adapter results/a-11/20261030-160737-397785/adapter \
+#   --budget-policy fixed-source \
+#   --fixed-source 12000 \
+#   --target-per-language 3732
+# 
+# Step 2. Copy verified dataset (COMPLETED)
+# mkdir -p data/training/prepared/balanced_multilingual
+# cp -a results/d-03a/prepare-20261107-v6/prepared/. \
+#   data/training/prepared/balanced_multilingual/
+# 
+# Step 3. Verify dataset integrity (COMPLETED)
+# diff -rq \
+#   results/d-03a/prepare-20261107-v6/prepared \
+#   data/training/prepared/balanced_multilingual
+# 
+# Step 4. Start M2 Training (3 GPUs, BF16 LoRA)
+# cd /home/user1-system11/research_dream/deepknowcode
+# python -m torch.distributed.run --standalone --nproc_per_node=3 \
+#   src/py2/d-03a-train-balanced-mixed-lora.py train \
+#   --run-dir results/d-03a/m2-balanced-multilingual \
+#   --prepared-dir data/training/prepared/balanced_multilingual
+# 
+# Step 5. Inspect training output (after completion)
+# cat results/d-03a/m2-balanced-multilingual/training_summary.json
+# ls -lh results/d-03a/m2-balanced-multilingual/adapter/
+# 
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PYFILE="$ROOT/src/py2/d-03-train-balanced-mixed-lora.py"
+PYFILE="$ROOT/src/py2/d-03a-train-balanced-mixed-lora.py"
 [[ -f "$PYFILE" ]] || { echo "Missing Python script: $PYFILE" >&2; exit 2; }
 MODE="${1:---audit}"
 shift || true
@@ -21,12 +55,12 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2;exit 2;;
   esac
 done
-case "$MODE" in --audit|--audit-max|--prepare|--train|--resume-train) ;; *) echo "Usage: bash src/sh2/d-03-train-balanced-mixed-lora.sh --audit|--audit-max|--prepare|--train|--resume-train [--target EVEN_INTEGER] [--budget-policy fixed-total|fixed-source] [--adapter PATH] [--run-dir PATH]" >&2;exit 2;;esac
+case "$MODE" in --audit|--audit-max|--prepare|--train|--resume-train) ;; *) echo "Usage: bash src/sh2/d-03a-train-balanced-mixed-lora.sh --audit|--audit-max|--prepare|--train|--resume-train [--target EVEN_INTEGER] [--budget-policy fixed-total|fixed-source] [--adapter PATH] [--run-dir PATH]" >&2;exit 2;;esac
 [[ "$TARGET" =~ ^[0-9]+$ ]] && (( TARGET > 0 && TARGET % 2 == 0 )) || { echo "Target must be a positive even integer" >&2;exit 2; }
 [[ "$POLICY" == fixed-total || "$POLICY" == fixed-source ]] || { echo "Invalid budget policy" >&2;exit 2; }
 export TZ=America/Chicago
 STAMP="$(date +%Y%m%d-%H%M%S)-$$"
-if [[ -z "$RUN" ]];then RUN="$ROOT/results/d-03/$STAMP";fi
+if [[ -z "$RUN" ]];then RUN="$ROOT/results/d-03a/$STAMP";fi
 if [[ "$MODE" == --resume-train ]];then
   [[ -f "$RUN/prepared/manifest.json" ]] || { echo "Existing --run-dir with prepared manifest required" >&2;exit 2; }
 else
@@ -34,10 +68,10 @@ else
   mkdir -p "$RUN"
 fi
 mkdir -p "$ROOT/logs"
-LOG="$ROOT/logs/d-03-$STAMP.log"
+LOG="$ROOT/logs/d-03a-$STAMP.log"
 exec > >(tee -a "$LOG") 2>&1
 trap 'ret=$?; echo "[D-03] exit=$ret run=$RUN log=$LOG chicago=$(date -Is)"' EXIT
-printf '[D-03 v5] start=%s mode=%s target_per_language=%s policy=%s run=%s\n' "$(date -Is)" "$MODE" "$TARGET" "$POLICY" "$RUN"
+printf '[D-03a v6] start=%s mode=%s target_per_language=%s policy=%s run=%s\n' "$(date -Is)" "$MODE" "$TARGET" "$POLICY" "$RUN"
 COMMON=(--root "$ROOT" --run-dir "$RUN" --target-per-language "$TARGET" --budget-policy "$POLICY")
 if [[ "$MODE" == --audit || "$MODE" == --audit-max ]];then
   CMD=audit

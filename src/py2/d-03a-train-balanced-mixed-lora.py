@@ -414,9 +414,9 @@ def prepare(args):
                 raise RuntimeError(
                     'C-10 approved Python corpus SHA256 mismatch: '
                     + json.dumps(mismatches, sort_keys=True)
-                    + '; D-03 v5 refuses to substitute an unapproved dataset.'
+                    + '; D-03a v6 refuses to substitute an unapproved dataset.'
                 )
-            print('[D-03 v5] C-10 approved Python dataset SHA256 VERIFIED '
+            print('[D-03a v6] C-10 approved Python dataset SHA256 VERIFIED '
                   '(data.jsonl, train.txt, valid.txt)', flush=True)
         codes[c]=read_codes(paths['data.jsonl'])
     source_hashes={code_fingerprint(x) for x in codes['java_source'].values()}
@@ -458,6 +458,10 @@ def prepare(args):
     answer_ids=encode_answer_ids(tokenizer)
     selected={}
     meta={}
+    # The TRAIN split is sampled exactly as in D-03 v5. For validation,
+    # reject any pair whose endpoint function ID appeared in TRAIN (within
+    # the same corpus). Never remove or replace training examples.
+    training_endpoint_ids = {}
     for split in ('train','validation'):
         # A-13 validation convention: 412/60/40, independent of the training budget.
         if split=='train':
@@ -483,9 +487,13 @@ def prepare(args):
                 for y in (0,1):rng.shuffle(pool[y])
             for y in (0,1):
                 if available[y]<n//2:raise RuntimeError(f'{c}/{split} class {y} has {available[y]} < {n//2}')
-            acc=Counter();drop=Counter()
+            acc=Counter();drop=Counter();disjoint_rejections=Counter()
+            disallowed = training_endpoint_ids.get(c, set()) if split == 'validation' else set()
             for y in (0,1):
                 for left,right,_ in pool[y]:
+                    if left in disallowed or right in disallowed:
+                        disjoint_rejections[y] += 1
+                        continue
                     token=build_tokens(codes[c][left],codes[c][right],y,tokenizer,answer_ids,
                         args.max_seq_length,'python' if c=='python_mixed' else 'java')
                     if token is None:
@@ -494,8 +502,26 @@ def prepare(args):
                     acc[y]+=1
                     if acc[y]==n//2:break
                 if acc[y]<n//2:raise RuntimeError(f'{c}/{split} class {y} TOKEN-FILTERED accepted {acc[y]} < {n//2}')
-            bydomain[c]={'selected':sum(acc.values()),'class_counts':dict(acc),'eligible_before_token_filter':dict(available),'overlength_skipped':dict(drop)}
-        if split=='train':rng.shuffle(allrows)  # static standard mixing; M3 will reuse same rows
+            bydomain[c]={'selected':sum(acc.values()),'class_counts':dict(acc),
+                         'eligible_before_token_filter':dict(available),
+                         'overlength_skipped':dict(drop),
+                         'validation_train_function_rejections':dict(disjoint_rejections)}
+        if split=='train':
+            rng.shuffle(allrows)  # static standard mixing; M3 will reuse same rows
+            training_endpoint_ids = {corpus: set() for corpus in CORPORA}
+            for row in allrows:
+                training_endpoint_ids[row['corpus']].update((row['id1'], row['id2']))
+        else:
+            overlap = {}
+            for corpus in CORPORA:
+                matched = training_endpoint_ids[corpus] & {
+                    endpoint for row in allrows if row['corpus'] == corpus
+                    for endpoint in (row['id1'], row['id2'])
+                }
+                overlap[corpus] = len(matched)
+            if any(overlap.values()):
+                raise RuntimeError('BLOCKED: TRAIN/VALIDATION function-ID overlap: ' + str(overlap))
+            print('[D-03a v6] VALIDATION_FUNCTION_DISJOINT ' + json.dumps(overlap,sort_keys=True),flush=True)
         selected[split]=allrows
         meta[split]={'count':len(allrows),'by_corpus':bydomain}
     # Hard stop on exact/whitespace-normalized held-out code overlap.
@@ -547,10 +573,11 @@ def prepare(args):
         'data_paths':paths_by_corpus,'data_sha256':hashes,'sample':meta,
         'answer_token_ids':answer_ids,'max_seq_length':args.max_seq_length,
         'training_plan':{'budget_policy':args.budget_policy,'train_counts':wanted,'global_batch':global_batch,
-                         'max_steps':args.max_steps,'eval_steps':args.eval_steps,'seed':args.seed,'heldout_normalized_code_overlap':0},
+                         'max_steps':args.max_steps,'eval_steps':args.eval_steps,'seed':args.seed,'heldout_normalized_code_overlap':0,'train_validation_function_id_overlap':{c:0 for c in CORPORA}},
         'limitations':['Project provenance and project-level independence NOT proven.',
                        'C-10 negative candidates include unadjudicated examples.',
                        'Exact pair/code overlap with held-out panel must be independently audited.',
+                       'Train/validation function-ID disjointness is enforced within each corpus, not across differently keyed corpora.',
                        'Target definition follows A-13: at least one non-BCB endpoint by normalized hash.']}
     write_json(args.prepared_dir/'manifest.json',manifest)
     write_json(args.run_dir/'availability.json',audit)
