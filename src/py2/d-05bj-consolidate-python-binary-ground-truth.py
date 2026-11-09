@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""D-05bj v1: consolidate independently submitted reviewer conventions into binary GT.
+"""D-05bj v2: consolidate independently submitted reviewer conventions into binary GT.
 
 Consumes D-05bd v1 source, D-05be v2 confirmed positives, D-05bh v1
 unified negatives and two submitted NEGATIVE review CSVs. Does not alter
@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = 'v1'
+VERSION = 'v2'
 POS_CONVENTION = 'BLANK_MEANS_REVIEWER_CONFIRMS_C01_CLONE_POSITIVE'
 NEG_CONVENTION = 'BLANK_MEANS_REVIEWER_CONFIRMS_NONCLONE_NEGATIVE'
 POS_PREPARED = 'annotation_packets.jsonl'
@@ -184,7 +184,9 @@ def validate_sources(positive_prepared,positive_confirmed,neg_candidates):
              'reviewer_b_confirmed':True,'independent_blind_annotation':False,
              'evaluation_eligible':True}
         k=pairkey(out)
-        require(k[0]!=k[1] and k not in positive_keys,'Duplicate/identical positive code pair '+pid)
+        # Type-1 clone positives may legitimately contain byte-identical functions.
+        # Reject repeated PAIR keys across records, not identical sides within one pair.
+        require(k not in positive_keys,'Duplicate positive code pair across records '+pid)
         positive_keys.add(k);positive.append(out)
     for pid,n in neg.items():
         l,r=source_side(n['left'],'left',pid),source_side(n['right'],'right',pid)
@@ -279,11 +281,12 @@ def main():
         require(len(all_hashes)==len(set(all_hashes)),'Cross-source code pair duplication')
         require(len(allrows)==7942,'Binary Gold count mismatch')
         now=datetime.now(ZoneInfo('America/Chicago'))
-        summary={'status':'DRY_RUN' if args.dry_run else 'D05BJ_V1_BINARY_GROUND_TRUTH_CONSOLIDATED',
+        summary={'status':'DRY_RUN' if args.dry_run else 'D05BJ_V2_BINARY_GROUND_TRUTH_CONSOLIDATED',
                  'created_at_chicago':now.isoformat(), 'positive_gold':len(pos),
                  'negative_gold':len(negative),'excluded_reviewer_detected_clones':len(reclassified),
                  'verified_binary_pairs':len(allrows),'project_coverage':len(positive_projects),
                  'reviewer_neg_label_counts':dict(review_counts),
+                 'identical_code_positive_pairs':sum(1 for r in pos if r['left']['code_sha256']==r['right']['code_sha256']),
                  'negative_blank_means':'CONFIRMED_NONCLONE_BY_EXPLICIT_USER_POLICY',
                  'reviewer_identity_authenticated':False,
                  'positive_independent_blind_review':False,
@@ -315,7 +318,8 @@ def main():
                  'The positive reference was C-01 detector-aware confirmation, not independent blind discovery.',
                  'Sampling was constructed from C-01-detected functions and is not representative of naturally occurring pairs.',
                  'Exact/normalized training exclusion inherited from upstream audited packet flags and manifests; near-duplicates are report-only.',
-                 'The four negative-candidate clone discoveries are excluded from binary frozen set and retained as a separate audit file.']})
+                 'The four negative-candidate clone discoveries are excluded from binary frozen set and retained as a separate audit file.',
+                 'Type-1 exact-identical function pairs are permitted for positive gold, while duplicate records of the same code-hash pair remain forbidden.']})
         (out/'annotation_audit.json').write_bytes(json_bytes(audit))
         leakage={'status':'UPSTREAM_EVIDENCE_VERIFIED_NOT_RECOMPUTED','active_training_validation_identity_overlap_candidates':0,
                  'c01_detected_negative_candidates':'NOT_RECOMPUTED_IN_D05BJ','source_code_sha256_verified':True,
@@ -334,7 +338,7 @@ def main():
         print(json.dumps(summary,sort_keys=True))
         return 0
     except (OSError,ValueError,KeyError,TypeError,IndexError,zipfile.BadZipFile,json.JSONDecodeError) as e:
-        print('D-05bj v1 ERROR:',e,file=sys.stderr)
+        print('D-05bj v2 ERROR:',e,file=sys.stderr)
         return 2
 
 
