@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# E-01c v2: ALL experiment parameters and paths are defined here.
+# E-01c v3: ALL experiment parameters, paths, and log settings are defined here.
+
+# E01C_GPUS=0,1,2 \
+# bash src/sh2/e-01c-train-standard-mixed-lora.sh \
+#   --train
+
 set -Eeuo pipefail
 export TZ=America/Chicago
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -51,6 +56,12 @@ PYTHON_MIXED_VALID_SHA256="33c5a0506fdbbd8ff5f9604a9be1d4fba1b6b6d52943ff11ff539
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
+# Logging configuration (Chicago local time; always preserve stdout + stderr).
+LOG_DIR="$ROOT/logs/e-01c"
+LOG_PREFIX="e-01c-v3"
+LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S"
+LOG_SAVE_ENABLED="true"
+LOG_TEE_CONSOLE="true"
 [[ $# -ge 1 ]] || { echo 'Usage: --preflight|--prepare|--train|--verify [--run-dir DIR]' >&2; exit 2; }
 MODE="$1"; shift
 case "$MODE" in --preflight) CMD=preflight;; --prepare) CMD=prepare;; --train) CMD=train;; --verify) CMD=verify;; *) echo "Invalid mode: $MODE" >&2; exit 2;; esac
@@ -70,4 +81,19 @@ args=("$CMD" --root "$ROOT" --original-m2 "$ORIGINAL_M2" --model-id "$MODEL_ID" 
  --lora-alpha "$LORA_ALPHA" --lora-dropout "$LORA_DROPOUT" --gpus "$GPU_IDS" --answer-no "$EXPECTED_ANSWER_NO"
  --answer-yes "$EXPECTED_ANSWER_YES" --python-mixed-data-sha256 "$PYTHON_MIXED_DATA_SHA256"
  --python-mixed-train-sha256 "$PYTHON_MIXED_TRAIN_SHA256" --python-mixed-valid-sha256 "$PYTHON_MIXED_VALID_SHA256")
-exec "$PYTHON_BIN" -u "$IMPLEMENTATION" "${args[@]}" "$@"
+# Use a unique, atomically created log filename; never overwrite earlier logs.
+if [[ "$LOG_SAVE_ENABLED" == "true" ]]; then
+  mkdir -p -- "$LOG_DIR"
+  LOG_STAMP="$(TZ=America/Chicago date "+$LOG_TIMESTAMP_FORMAT")"
+  LOG_FILE="$(mktemp "$LOG_DIR/${LOG_PREFIX}-${CMD}-${LOG_STAMP}-XXXXXX.log")"
+  printf '[E-01c v3] Mode: %s\n[E-01c v3] Log: %s\n[E-01c v3] Chicago started: %s\n' \
+    "$CMD" "$LOG_FILE" "$(TZ=America/Chicago date --iso-8601=seconds)" | tee -a "$LOG_FILE"
+  if [[ "$LOG_TEE_CONSOLE" == "true" ]]; then
+    # With pipefail, a failing Python process produces a failing shell exit code.
+    "$PYTHON_BIN" -u "$IMPLEMENTATION" "${args[@]}" "$@" 2>&1 | tee -a "$LOG_FILE"
+  else
+    "$PYTHON_BIN" -u "$IMPLEMENTATION" "${args[@]}" "$@" >> "$LOG_FILE" 2>&1
+  fi
+else
+  exec "$PYTHON_BIN" -u "$IMPLEMENTATION" "${args[@]}" "$@"
+fi
