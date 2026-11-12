@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-01c v1 M2 mixed-source LoRA: independent multi-LLM core.
+"""F-01c v3 M2 mixed-source LoRA: independent multi-LLM core.
 
 Model choices, all experiment parameters, paths, budgets, seeding, scoring IDs
 and training settings are exclusively Shell -> required CLI. No silent defaults.
@@ -14,9 +14,10 @@ from collections import Counter
 from pathlib import Path
 
 import f01c_shared as s
-from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids
+from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids, contextual_continuation
+from f01c_comments import POLICY as COMMENT_POLICY, UnsafeJavaLexing, strip_java_comments
 
-VERSION = 'v1'
+VERSION = 'v3'
 CORPORA = ('java_source', 'java_mixed', 'python_mixed')
 
 
@@ -64,7 +65,7 @@ def arg_validate(a):
         raise ValueError('Held-out overlap check cannot be disabled in M2')
     if a.max_overlap_examples<1 or a.max_train_examples<2 or a.max_val_examples<2:
         raise ValueError('Invalid count or overlap settings')
-    if a.purpose not in ('preflight','prepare','smoke','train'):
+    if a.purpose not in ('preflight','prepare','smoke','train','audit','comment-audit'):
         raise ValueError('Invalid execution purpose')
     if a.adapter_dir!=a.run_dir/'adapter' or a.prepared_dir!=a.run_dir/'prepared' or a.checkpoint_dir!=a.run_dir/'checkpoints':
         raise ValueError('Artifact paths must be under this run directory')
@@ -82,6 +83,13 @@ def arg_validate(a):
         raise ValueError('NO token ID malformed')
     if a.token_policy=='contextual-one-token' and ('derive' in (a.expected_yes_token,a.expected_no_token)):
         raise ValueError('CodeLlama must have pinned contextual YES/NO IDs')
+    # Audit thresholds are shell-owned. They are diagnostic only and cannot change training.
+    if (not a.audit_token_limits or sorted(set(a.audit_token_limits)) != a.audit_token_limits
+            or any(n < 1 for n in a.audit_token_limits)
+            or a.max_seq_length not in a.audit_token_limits):
+        raise ValueError('Audit token limits must be strictly increasing positive integers including max_seq_length')
+    if a.comment_removal_policy != COMMENT_POLICY:
+        raise ValueError('Unsupported Java comment removal audit policy')
     if a.greater_is_better or a.use_cache or a.save_total_limit!=0:
         raise ValueError('Unapproved checkpoint/persistence strategy')
 
@@ -92,6 +100,7 @@ def implementation_sha(a):
         a.root/'src/py2/f01c_shared.py',
         a.root/'src/py2/f01c_core.py',
         a.root/'src/py2/f01c_variants.py',
+        a.root/'src/py2/f01c_comments.py',
         a.root/'src/sh2/f-01c-train-standard-mixed-lora.sh')}
 
 
@@ -194,7 +203,7 @@ def validate_args(a):arg_validate(a)
 def run_preflight(a):
     m1,data,_,_,model,_,sig=validated(a)
     a.run_dir.mkdir(parents=True,exist_ok=False)
-    report={'status':'F01C_V1_PREFLIGHT_PASS_NOT_TRAINED','version':VERSION,'created_at_chicago':s.chicago_now(),
+    report={'status':'F01C_V3_PREFLIGHT_PASS_NOT_TRAINED','version':VERSION,'created_at_chicago':s.chicago_now(),
             'configuration':s.configuration(a),'m1':m1,'dataset':data,'model':model,
             'signature':sig,'implementation_sha256':implementation_sha(a),
             'limitations':['No GPU training in preflight','Training eligibility and held-out overlap require full preparation']}
@@ -275,6 +284,198 @@ def selected_data(a,codes,source_hash,tok,answers):
     return selected,stats
 
 
+def audit_label_lengths(lengths, required, limits, max_seq_length):
+    """Pure count summary; no silent resampling or change to any training budget."""
+    lengths = sorted(lengths)
+    eligible = {str(limit): sum(n <= limit for n in lengths) for limit in limits}
+    current = eligible[str(max_seq_length)]
+    return {
+        'required': required,
+        'candidate_count_after_source_filter': len(lengths),
+        'eligible_at_training_limit': current,
+        'overlength_at_training_limit': len(lengths) - current,
+        'deficit_at_training_limit': max(0, required - current),
+        'eligible_by_token_limit': eligible,
+        'minimum_token_limit_for_quota': lengths[required - 1] if len(lengths) >= required and required else None,
+        'max_observed_tokens': lengths[-1] if lengths else None,
+        'p50_tokens': lengths[(len(lengths)-1)//2] if lengths else None,
+        'p95_tokens': lengths[(95*(len(lengths)-1))//100] if lengths else None,
+        'status': 'PASS' if current >= required else 'INSUFFICIENT_ELIGIBLE_PAIRS',
+    }
+
+
+def audit_target_eligibility(a, codes, source_hash, tokenizer, answer_ids):
+    """Read-only candidate census for both target domains and both splits.
+
+    Mirrors target_pool's normalized Java source exclusion and the exact contextual
+    prompt/answer policy used by select_domain. Validation endpoint bans are
+    intentionally not applied: no full train selection can be guaranteed when
+    a quota is infeasible. Such bans can only reduce eligible counts.
+    """
+    limits = a.audit_token_limits
+    budget = {
+        'train': {'java_mixed': a.java_target_train, 'python_mixed': a.python_target_train},
+        'validation': {'java_mixed': a.java_target_val, 'python_mixed': a.python_target_val},
+    }
+    report = {}
+    failures = []
+    for split in ('train', 'validation'):
+        report[split] = {}
+        for corpus in ('java_mixed', 'python_mixed'):
+            path = all_paths(a)[corpus] / ('train.txt' if split == 'train' else 'valid.txt')
+            pool = target_pool(path, codes[corpus], source_hash)
+            language = 'python' if corpus == 'python_mixed' else 'java'
+            labels = {}
+            for label in (0, 1):
+                lengths = []
+                for x, z, _ in pool[label]:
+                    prompt = (a.prompt_prefix.replace('Language: java\n', f'Language: {language}\n')
+                              + codes[corpus][x] + a.prompt_b_separator + codes[corpus][z] + a.prompt_suffix)
+                    answer = a.answer_yes if label else a.answer_no
+                    prefix, token = contextual_continuation(tokenizer, prompt, answer)
+                    if token != answer_ids[label]:
+                        raise ValueError(f'Pinned answer token drift: {corpus}/{split} label={label} IDs={x},{z}')
+                    lengths.append(len(prefix) + 1)
+                required = budget[split][corpus] // 2
+                labels[str(label)] = audit_label_lengths(lengths, required, limits, a.max_seq_length)
+                if labels[str(label)]['status'] != 'PASS':
+                    failures.append({'corpus':corpus,'split':split,'label':label,
+                                     'deficit':labels[str(label)]['deficit_at_training_limit']})
+            report[split][corpus] = {'requested_pairs':budget[split][corpus], 'labels':labels}
+    return {'status':'F01C_V3_ELIGIBILITY_AUDIT_PASS' if not failures else 'F01C_V3_ELIGIBILITY_AUDIT_INSUFFICIENT',
+            'training_max_seq_length':a.max_seq_length,'audit_token_limits':limits,
+            'training_parameters_changed':False,'candidate_deficits':failures,
+            'limitations':['Counts reflect target_pool source fingerprint exclusion and exact prompt tokenization.',
+                           'Validation train/validation endpoint isolation is not applied; eligibility is an upper bound.',
+                           'Eligibility at larger token limits is diagnostic only; no training configuration is modified.',
+                           'PASS does not guarantee full prepare, which also enforces deterministic selection and other checks.'],
+            'domains':report}
+
+
+def run_audit_eligibility(a):
+    m1, data, codes, source_hash, model, tok, sig = validated(a)
+    report = audit_target_eligibility(a,codes,source_hash,tok,model['answer_ids'])
+    report.update({'version':VERSION,'created_at_chicago':s.chicago_now(),
+                   'model_id':a.model_id,'model_revision':a.model_revision,
+                   'signature':sig,'configuration':s.configuration(a),
+                   'source_dataset_sha256':data['sha256'],
+                   'm1_adapter_sha256':m1['adapter_model_sha256'],
+                   'implementation_sha256':implementation_sha(a)})
+    a.run_dir.mkdir(parents=True,exist_ok=False)
+    target = a.run_dir / 'token_eligibility_audit.json'
+    s.exclusive_json(target,report)
+    print(json.dumps({'status':report['status'],'report':str(target),
+                      'candidate_deficits':report['candidate_deficits'],
+                      'training_parameters_changed':False},ensure_ascii=False),flush=True)
+
+
+
+def comment_audit_candidates(a, codes, source_hash, tokenizer, answer_ids, heldout_hashes):
+    """Read-only study of overlength Java train negatives. No trainer changes."""
+    pool = target_pool(a.java_target_dir / 'train.txt', codes['java_mixed'], source_hash)
+    code_map = codes['java_mixed']
+    baseline_eligible = 0
+    original_overlength = []
+    # Re-tokenize the exact original training prompt and answer; no approximation.
+    for x, z, label in pool[0]:
+        prompt = (a.prompt_prefix + code_map[x] + a.prompt_b_separator
+                  + code_map[z] + a.prompt_suffix)
+        prefix, token = contextual_continuation(tokenizer, prompt, a.answer_no)
+        if token != answer_ids[0]:
+            raise ValueError('Pinned contextual NO token drift')
+        length = len(prefix) + 1
+        if length <= a.max_seq_length:
+            baseline_eligible += 1
+        else:
+            original_overlength.append((x, z, length))
+    required = a.java_target_train // 2
+    need = max(0, required - baseline_eligible)
+    records = []
+    # Compute hashes of preprocessed functions to detect obvious collisions.
+    transformed_fingerprints = {}
+    for x, z, before in original_overlength:
+        row = {'id1':x, 'id2':z, 'label':0, 'original_tokens':before,
+               'original_code_sha256':{'id1':s.sha_text(code_map[x]),'id2':s.sha_text(code_map[z])},
+               'original_pair_sha256':s.canonical_hash([x,z,0,code_map[x],code_map[z]])}
+        try:
+            left, count_a = strip_java_comments(code_map[x])
+            right, count_b = strip_java_comments(code_map[z])
+            row['comments_removed'] = {'id1':count_a,'id2':count_b}
+            row['processed_code_sha256'] = {'id1':s.sha_text(left),'id2':s.sha_text(right)}
+            row['processed_pair_sha256'] = s.canonical_hash([x,z,0,left,right])
+            row['changed'] = (left != code_map[x] or right != code_map[z])
+            if not row['changed']:
+                row['status'] = 'NO_COMMENTS'
+            else:
+                fingerprints = (s.code_hash(left),s.code_hash(right))
+                row['collision_with_source'] = any(h in source_hash for h in fingerprints)
+                row['collision_with_heldout'] = any(h in heldout_hashes for h in fingerprints)
+                row['both_functions_nonempty'] = bool(left.strip() and right.strip())
+                prompt = a.prompt_prefix + left + a.prompt_b_separator + right + a.prompt_suffix
+                prefix, token = contextual_continuation(tokenizer, prompt, a.answer_no)
+                if token != answer_ids[0]:
+                    raise UnsafeJavaLexing('Contextual NO token drift after comment removal')
+                row['processed_tokens'] = len(prefix) + 1
+                row['token_reduction'] = before - row['processed_tokens']
+                row['within_training_limit'] = row['processed_tokens'] <= a.max_seq_length
+                row['status'] = ('ELIGIBLE_FOR_REVIEW' if row['within_training_limit']
+                                 and row['both_functions_nonempty']
+                                 and not row['collision_with_source']
+                                 and not row['collision_with_heldout']
+                                 else 'NOT_ELIGIBLE')
+                for idx, fingerprint in zip((x,z), fingerprints):
+                    transformed_fingerprints.setdefault(fingerprint,set()).add(idx)
+        except (UnsafeJavaLexing, ValueError) as exc:
+            row['status'] = 'UNSAFE_LEXING_OR_TOKENIZATION'
+            row['reason'] = str(exc)
+        records.append(row)
+    # Endpoint collisions are informative, not automatically proof of leakage.
+    for row in records:
+        if row['status'] == 'ELIGIBLE_FOR_REVIEW':
+            row['processed_fingerprint_collision_ids'] = {
+                key:sorted(transformed_fingerprints.get(s.code_hash(strip_java_comments(code_map[row[key]])[0]),set()) - {row[key]})
+                for key in ('id1','id2')}
+            if any(row['processed_fingerprint_collision_ids'].values()):
+                row['status'] = 'DUPLICATE_REVIEW_REQUIRED'
+    recoverable = sum(r['status']=='ELIGIBLE_FOR_REVIEW' for r in records)
+    return {'status': ('F01C_V3_COMMENT_AUDIT_POTENTIAL_RECOVERY' if recoverable >= need
+                        else 'F01C_V3_COMMENT_AUDIT_INSUFFICIENT'),
+            'audit_only':True,'training_parameters_changed':False,
+            'comment_removal_policy':COMMENT_POLICY,
+            'java_target_negative_required':required,
+            'baseline_eligible':baseline_eligible,'baseline_shortfall':need,
+            'overlength_candidates':len(original_overlength),
+            'eligible_for_manual_integrity_review':recoverable,
+            'remaining_shortfall_before_manual_approval':max(0,need-recoverable),
+            'approved_for_training':False,
+            'limitations':['Lexer-based conservative removal is not a full Java parser or proof of semantic equivalence.',
+                           'Unicode escapes and malformed quoted literals fail closed.',
+                           'Only direct normalized source/heldout collisions are checked; near-duplicates and leakage require review.',
+                           'No automatic dataset modification, training input substitution or label change.',
+                           'Candidate eligibility does not guarantee deterministic sampling or validation endpoint isolation.'],
+            'candidates':records}
+
+
+def run_audit_comments(a):
+    m1, data, codes, source_hash, model, tok, sig = validated(a)
+    heldout, heldout_info = s.read_eval_fingerprints(a)
+    report = comment_audit_candidates(a,codes,source_hash,tok,model['answer_ids'],heldout)
+    report.update({'version':VERSION,'created_at_chicago':s.chicago_now(),
+                   'model_id':a.model_id,'model_revision':a.model_revision,
+                   'signature':sig,'configuration':s.configuration(a),
+                   'source_dataset_sha256':data['sha256'],
+                   'heldout_corpus':heldout_info,
+                   'm1_adapter_sha256':m1['adapter_model_sha256'],
+                   'implementation_sha256':implementation_sha(a)})
+    a.run_dir.mkdir(parents=True,exist_ok=False)
+    target = a.run_dir/'comment_removal_audit.json'
+    s.exclusive_json(target,report)
+    print(json.dumps({'status':report['status'],'report':str(target),
+                      'baseline_shortfall':report['baseline_shortfall'],
+                      'eligible_for_manual_integrity_review':report['eligible_for_manual_integrity_review'],
+                      'approved_for_training':False},ensure_ascii=False),flush=True)
+
+
 def check_heldout(a,selected,codes):
     heldout,detail=s.read_eval_fingerprints(a)
     failures=[]
@@ -294,7 +495,7 @@ def require_smoke(a,sig):
     for file in reversed(sorted(home.glob('*-smoke/smoke_success.json'))):
         try:
             obj=s.read_json(file)
-            if obj.get('status')=='F01C_V1_SMOKE_PASS' and obj.get('compatibility_signature')==sig and obj.get('initial_adapter_sha256')==a.initial_adapter_sha256:
+            if obj.get('status')=='F01C_V3_SMOKE_PASS' and obj.get('compatibility_signature')==sig and obj.get('initial_adapter_sha256')==a.initial_adapter_sha256:
                 # Revalidate recorded adapter integrity, not merely presence of a JSON proof.
                 ad=Path(obj['adapter'])
                 hashes=obj.get('adapter_sha256',{})
@@ -346,7 +547,7 @@ def run_prepare(a):
                        'M3 MUST use byte-identical prepared files to compare order only',
                        'Model tokenization may prevent exact Pair ID matching across different LLMs; hashes are recorded']}
     s.exclusive_json(a.prepared_dir/'manifest.json',manifest)
-    print(json.dumps({'status':'F01C_V1_PREPARED_NOT_TRAINED','run':str(a.run_dir),'train':len(selected['train']),
+    print(json.dumps({'status':'F01C_V3_PREPARED_NOT_TRAINED','run':str(a.run_dir),'train':len(selected['train']),
                       'validation':len(selected['validation']),'train_pair_ids_sha256':stats['train']['pair_ids_sha256'],
                       'manifest_sha256':s.sha256(a.prepared_dir/'manifest.json')}),flush=True)
 
@@ -474,7 +675,7 @@ def run_finalize(a):
         if s.sha256(s.require_file(a.adapter_dir/name))!=digest:raise RuntimeError('Adapter weight/checksum mismatch '+name)
     if summ['initial_m1_sha256']!=m['initial_m1']['adapter_model_sha256']:
         raise RuntimeError('M1 adapter SHA changed')
-    status='F01C_V1_SMOKE_PASS' if a.purpose=='smoke' else 'F01C_V1_M2_TRAINING_COMPLETE'
+    status='F01C_V3_SMOKE_PASS' if a.purpose=='smoke' else 'F01C_V3_M2_TRAINING_COMPLETE'
     rec={'version':VERSION,'status':status,'created_at_chicago':s.chicago_now(),
          'model_id':a.model_id,'model_revision':a.model_revision,'model_mode':a.model_mode,
          'initial_adapter_sha256':m['initial_m1']['adapter_model_sha256'],
@@ -500,4 +701,4 @@ def run_verify(a):
         raise RuntimeError('Training summary hash mismatch')
     for name,digest in r['adapter_sha256'].items():
         if s.sha256(s.require_file(a.adapter_dir/name))!=digest:raise RuntimeError('Adapter hash mismatch '+name)
-    print(json.dumps({'status':'F01C_V1_VERIFY_PASS','run':str(a.run_dir),'adapter':str(a.adapter_dir)}),flush=True)
+    print(json.dumps({'status':'F01C_V3_VERIFY_PASS','run':str(a.run_dir),'adapter':str(a.adapter_dir)}),flush=True)

@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids
-VERSION = 'v1'
+VERSION = 'v3'
 
 def chicago_now():
     return datetime.now(ZoneInfo('America/Chicago')).isoformat()
