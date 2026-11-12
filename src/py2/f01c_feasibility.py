@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only deterministic F-01c v15 train/validation feasibility reconstruction.
+"""Read-only deterministic F-01c v18 train/validation feasibility reconstruction.
 
 NEVER modifies the clean corpora, prepared samples, adapter, or training pipeline.
 Transformation changes program behavior; negative labels require independent review.

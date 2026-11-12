@@ -17,7 +17,7 @@ import f01c_shared as s
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids, contextual_continuation
 from f01c_comments import POLICY as COMMENT_POLICY, UnsafeJavaLexing, strip_java_comments
 
-VERSION = 'v15'
+VERSION = 'v18'
 CORPORA = ('java_source', 'java_mixed', 'python_mixed')
 
 
@@ -716,7 +716,7 @@ def run_audit_feasibility(a):
     full_val=sum(x['validation']['count'] for x in domain.values())
     counts_ok=full_train == a.max_train_examples+a.java_target_train+a.python_target_train and full_val==a.max_val_examples
     structurally_feasible=java['quota_feasible_under_review'] and counts_ok and overlap_count==0
-    status='F01C_V14_FEASIBLE_PENDING_LABEL_REVIEW' if structurally_feasible else 'F01C_V14_FEASIBILITY_BLOCKED'
+    status='F01C_V18_FEASIBLE_PENDING_LABEL_REVIEW' if structurally_feasible else 'F01C_V18_FEASIBILITY_BLOCKED'
     result={'status':status,'version':VERSION,'audit_only':True,'approved_for_training':False,
         'label_verified':False,'training_parameters_changed':False,'created_at_chicago':s.chicago_now(),
         'structurally_feasible_pending_label_review':structurally_feasible,
@@ -857,10 +857,78 @@ def check_m1_source_identity(a,selected):
             'm1_source_pair_set_sha256':s.canonical_hash(sorted(initial)),'source_pair_count':len(initial)}
 
 
+def select_review_prepared(a,codes,source_hash,tok,answers,data,heldout):
+    """Recompute the v15 feasible selection, embedding reviewed variant bytes (not training-approved)."""
+    import f01c_feasibility as f
+    folder=f.discover_source(a.root/'results/f-01c'/a.model_mode,a.feasibility_source_run)
+    report=s.read_json(s.require_file(folder/'structural_truncation_audit.json'))
+    proposals=f.verify_proposals(folder,report,codes['java_mixed'],data['sha256'],
+                                 a.max_seq_length,tok,a,answers,source_hash,heldout)
+    java,java_train,java_val=f.select_java(a,codes['java_mixed'],source_hash,tok,answers,proposals,heldout)
+    if not java['quota_feasible_under_review']:
+        raise RuntimeError('BLOCKED: java variant quota / uniqueness / validation isolation failed')
+    quantities={'train':{'java_source':a.max_train_examples,'java_mixed':a.java_target_train,'python_mixed':a.python_target_train},
+                'validation':{'java_source':a.source_val,'java_mixed':a.java_target_val,'python_mixed':a.python_target_val}}
+    selected={};stats={};parents={c:set() for c in CORPORA}
+    for split in ('train','validation'):
+        out=[];meta={}
+        for corpus in CORPORA:
+            if corpus=='java_mixed':
+                raw=java_train if split=='train' else java_val
+                rows=[]
+                for entry in raw:
+                    row={k:v for k,v in entry.items() if k not in ('a','b')}
+                    row['corpus']=corpus
+                    if 'a' in entry:
+                        row['code_a_override']=entry['a']
+                        row['code_b_override']=entry['b']
+                    rows.append(row)
+                by_label=Counter(r['label'] for r in rows)
+                metadata={'count':len(rows),'labels':{str(y):by_label[y] for y in (0,1)},
+                          'structural_variant_selected':sum(r.get('origin')=='structural-v13' for r in rows)}
+            else:
+                rows,metadata=select_domain(a,corpus,split,quantities[split][corpus],codes[corpus],
+                    source_hash,tok,answers,parents[corpus] if split=='validation' else set())
+            out.extend(rows);meta[corpus]=metadata
+            if split=='train':
+                parents[corpus].update(idx for r in rows for idx in (r['id1'],r['id2']))
+        random.Random(a.seed+(0 if split=='train' else a.sample_val_seed_offset)+a.sample_order_seed_offset).shuffle(out)
+        selected[split]=out
+        stats[split]=meta
+        stats[split]['total']=len(out)
+        stats[split]['pair_ids_sha256']=s.canonical_hash([(r['corpus'],r['id1'],r['id2'],r['label']) for r in out])
+    if (len(selected['train'])!=sum(quantities['train'].values()) or
+        len(selected['validation'])!=a.max_val_examples):
+        raise RuntimeError('BLOCKED: mixed prepared dataset quotas not met')
+    selected_java=[r for r in selected['train'] if r['corpus']=='java_mixed']
+    selected_source=[r for r in selected['train'] if r['corpus']=='java_source']
+    original_source={s.code_hash(codes['java_source'][idx]) for r in selected_source for idx in (r['id1'],r['id2'])}
+    effective_target={s.code_hash(r.get('code_a_override',codes['java_mixed'][r['id1']])) for r in selected_java}
+    effective_target.update(s.code_hash(r.get('code_b_override',codes['java_mixed'][r['id2']])) for r in selected_java)
+    if original_source & effective_target:
+        raise RuntimeError('BLOCKED: java_source and effective java_mixed overlap')
+    selected_mod=[r for r in selected_java if r.get('origin')=='structural-v13']
+    for r in selected_mod:
+        if s.code_hash(r['code_a_override']) in heldout or s.code_hash(r['code_b_override']) in heldout:
+            raise RuntimeError('BLOCKED: transformed code found in heldout')
+    evidence={'status':'STRUCTURALLY_VALID_PENDING_LABEL_REVIEW','source_report_sha256':s.sha256(folder/'structural_truncation_audit.json'),
+              'source_proposals_sha256':s.sha256(folder/'structural_truncation_proposals.jsonl'),
+              'structural_source_run':str(folder),'java_checks':java['checks'],
+              'variant_count':len(selected_mod),'label_verified':False,'approved_for_training':False,
+              'transformed_pairs':[{'id1':r['id1'],'id2':r['id2'],'tokens':r['tokens'],
+                                    'changed_sides':r['changed_sides'],
+                                    'code_instance_id1':r['code_instance_id1'],
+                                    'code_instance_id2':r['code_instance_id2']} for r in selected_mod]}
+    return selected,stats,evidence
+
+
 def run_prepare(a):
+    if a.purpose != 'prepare':
+        raise RuntimeError('BLOCKED: variant preparation is review-only; smoke/train not approved')
     m1,data,codes,source_hash,model,tok,sig=validated(a)
     smoke=require_smoke(a,sig) if a.purpose=='train' else None
-    selected,stats=selected_data(a,codes,source_hash,tok,model['answer_ids'])
+    heldout,_=s.read_eval_fingerprints(a)
+    selected,stats,variant_evidence=select_review_prepared(a,codes,source_hash,tok,model['answer_ids'],data,heldout)
     leakage=check_heldout(a,selected,codes)
     m1_source_identity=check_m1_source_identity(a,selected)
     if a.source_pair_ids_sha256!='unverified' and a.source_pair_ids_sha256!=stats['train']['pair_ids_sha256']:
@@ -872,18 +940,18 @@ def run_prepare(a):
         with file.open('x',encoding='utf-8') as f:
             for row in selected[split]:f.write(json.dumps(row,sort_keys=True)+'\n')
         stats[split]['sha256']=s.sha256(file)
-    manifest={'status':'PREPARED_NOT_TRAINED','version':VERSION,'task':'F-01c M2 Standard Mixed LoRA from frozen M1',
+    manifest={'status':'PREPARED_PENDING_LABEL_REVIEW','version':VERSION,'task':'F-01c M2 Standard Mixed LoRA from frozen M1',
         'created_at_chicago':s.chicago_now(),'model':model,'initial_m1':m1,'dataset':data,
         'configuration':s.configuration(a),'training_plan':{'order':'standard-mixed-shuffled','train':{'java_source':a.max_train_examples,'java_mixed':a.java_target_train,'python_mixed':a.python_target_train},
                           'validation':{'java_source':a.source_val,'java_mixed':a.java_target_val,'python_mixed':a.python_target_val},
                           'global_batch':a.expected_world_size*a.per_device_batch_size*a.gradient_accumulation_steps,'steps':a.max_steps},
-        'sample':stats,'heldout_overlap':leakage,'m1_source_identity':m1_source_identity,'answer_ids':{str(k):v for k,v in model['answer_ids'].items()},
+        'sample':stats,'variant_evidence':variant_evidence,'approved_for_training':False,'heldout_overlap':leakage,'m1_source_identity':m1_source_identity,'answer_ids':{str(k):v for k,v in model['answer_ids'].items()},
         'compatibility_signature':sig,'implementation_sha256':implementation_sha(a),'validated_smoke':smoke,
         'limitations':['Negative candidates in C-10 corpus may be unadjudicated','Project-level independence not established',
                        'M3 MUST use byte-identical prepared files to compare order only',
                        'Model tokenization may prevent exact Pair ID matching across different LLMs; hashes are recorded']}
     s.exclusive_json(a.prepared_dir/'manifest.json',manifest)
-    print(json.dumps({'status':'F01C_V11_PREPARED_NOT_TRAINED','run':str(a.run_dir),'train':len(selected['train']),
+    print(json.dumps({'status':'F01C_V18_PREPARED_PENDING_LABEL_REVIEW','run':str(a.run_dir),'train':len(selected['train']),
                       'validation':len(selected['validation']),'train_pair_ids_sha256':stats['train']['pair_ids_sha256'],
                       'manifest_sha256':s.sha256(a.prepared_dir/'manifest.json')}),flush=True)
 
@@ -896,7 +964,7 @@ class MixedDataset:
     def __getitem__(self,i):
         if i not in self.cache:
             row=self.rows[i]; corpus=row['corpus'];lang='python' if corpus=='python_mixed' else 'java'
-            text=self.a.prompt_prefix.replace('Language: java\n',f'Language: {lang}\n')+self.codes[corpus][row['id1']]+self.a.prompt_b_separator+self.codes[corpus][row['id2']]+self.a.prompt_suffix
+            text=self.a.prompt_prefix.replace('Language: java\n',f'Language: {lang}\n')+row.get('code_a_override',self.codes[corpus][row['id1']])+self.a.prompt_b_separator+row.get('code_b_override',self.codes[corpus][row['id2']])+self.a.prompt_suffix
             data=checked_training_tokens(self.tokenizer,text,self.a.answer_yes if row['label'] else self.a.answer_no,
                                          self.answers[row['label']],self.a.max_seq_length)
             if data is None or len(data['input_ids'])!=row['tokens']:
@@ -907,7 +975,8 @@ class MixedDataset:
 
 def verify_prepared(a):
     path=s.require_file(a.prepared_dir/'manifest.json');m=s.read_json(path)
-    if m.get('status')!='PREPARED_NOT_TRAINED':raise RuntimeError('Invalid M2 prepared manifest')
+    if m.get('status')!='PREPARED_NOT_TRAINED' or m.get('approved_for_training') is not True:
+        raise RuntimeError('BLOCKED: independent variant label review and explicit training approval required')
     if m['implementation_sha256']!=implementation_sha(a):raise RuntimeError('Implementation changed since dataset preparation')
     baseline=m['configuration'].copy(); actual=s.configuration(a)
     if a.command=='verify':
