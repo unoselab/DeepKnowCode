@@ -17,7 +17,7 @@ import f01c_shared as s
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids, contextual_continuation
 from f01c_comments import POLICY as COMMENT_POLICY, UnsafeJavaLexing, strip_java_comments
 
-VERSION = 'v18'
+VERSION = 'v24'
 CORPORA = ('java_source', 'java_mixed', 'python_mixed')
 
 
@@ -951,7 +951,7 @@ def run_prepare(a):
                        'M3 MUST use byte-identical prepared files to compare order only',
                        'Model tokenization may prevent exact Pair ID matching across different LLMs; hashes are recorded']}
     s.exclusive_json(a.prepared_dir/'manifest.json',manifest)
-    print(json.dumps({'status':'F01C_V18_PREPARED_PENDING_LABEL_REVIEW','run':str(a.run_dir),'train':len(selected['train']),
+    print(json.dumps({'status':'F01C_V21_PREPARED_PENDING_LABEL_REVIEW','run':str(a.run_dir),'train':len(selected['train']),
                       'validation':len(selected['validation']),'train_pair_ids_sha256':stats['train']['pair_ids_sha256'],
                       'manifest_sha256':s.sha256(a.prepared_dir/'manifest.json')}),flush=True)
 
@@ -973,17 +973,69 @@ class MixedDataset:
         return self.cache[i]
 
 
+def approval_bound_files(a):
+    """Resolve the immutable v17 dataset directly; no external approval artifact."""
+    if a.purpose not in ('smoke','train'):
+        raise RuntimeError('Frozen training dataset is only supported for smoke/train')
+    prepared=Path(a.approved_prepared_run).resolve()
+    expected={'train.jsonl':a.frozen_train_sha256,
+              'validation.jsonl':a.frozen_validation_sha256,
+              'manifest.json':a.frozen_manifest_sha256}
+    for name,hash_value in expected.items():
+        if len(hash_value)!=64 or any(x not in '0123456789abcdef' for x in hash_value):
+            raise ValueError('Invalid frozen SHA256 pin: '+name)
+    paths={name:prepared/'prepared'/name for name in expected}
+    for name,path in paths.items():
+        if s.sha256(s.require_file(path))!=expected[name]:
+            raise RuntimeError('Frozen v17 prepared SHA256 mismatch: '+name)
+    manifest=s.read_json(paths['manifest.json'])
+    if manifest.get('status')!='PREPARED_PENDING_LABEL_REVIEW':
+        raise RuntimeError('Unexpected frozen prepared manifest status')
+    if manifest['sample']['train']['sha256']!=expected['train.jsonl'] or manifest['sample']['validation']['sha256']!=expected['validation.jsonl']:
+        raise RuntimeError('Prepared manifest sample SHA256 mismatch')
+    if manifest['sample']['train']['total']!=19464 or manifest['sample']['validation']['total']!=512:
+        raise RuntimeError('Frozen prepared counts differ')
+    if manifest['training_plan']['global_batch']!=a.expected_world_size*a.per_device_batch_size*a.gradient_accumulation_steps:
+        raise RuntimeError('Frozen M2 global batch changed')
+    original=manifest['configuration'];actual=s.configuration(a)
+    transient={'run_dir','prepared_dir','adapter_dir','checkpoint_dir','log_file','log_timestamp',
+               'log_prefix','purpose','version','approved_prepared_run','training_approval_report','smoke_success_run'}
+    if a.purpose=='smoke':transient|={'max_steps','eval_steps','log_steps','warmup_steps'}
+    differences=[k for k in original if k not in transient and original[k]!=actual.get(k)]
+    if differences:raise RuntimeError('BLOCKED: frozen prepared configuration changed: '+repr(differences))
+    return paths,{'prepared_sha256':expected,'source_prepared_run':str(prepared)},manifest
+
+
+def run_stage_approved(a):
+    import shutil
+    paths,approval,manifest=approval_bound_files(a)
+    a.run_dir.mkdir(parents=True,exist_ok=False)
+    a.prepared_dir.mkdir(exist_ok=False)
+    for name,src in paths.items():
+        dst=a.prepared_dir/name
+        with dst.open('xb') as out,src.open('rb') as inp:shutil.copyfileobj(inp,out)
+        if s.sha256(dst)!=approval['prepared_sha256'][name]:raise RuntimeError('Prepared copy SHA mismatch')
+    s.exclusive_json(a.run_dir/'training_approval_binding.json',{
+        'status':'F01C_V24_FROZEN_DATASET_BOUND','created_at_chicago':s.chicago_now(),
+        'approval_report':None,
+        'approval_sha256':approval['prepared_sha256']['manifest.json'],
+        'prepared_sha256':approval['prepared_sha256'], 'purpose':a.purpose,
+        'source_prepared_run':str(Path(a.approved_prepared_run).resolve())})
+    print(json.dumps({'status':'F01C_V24_FROZEN_DATASET_STAGED','purpose':a.purpose,'run':str(a.run_dir),
+                      'prepared_sha256':approval['prepared_sha256']}),flush=True)
+
+
 def verify_prepared(a):
-    path=s.require_file(a.prepared_dir/'manifest.json');m=s.read_json(path)
-    if m.get('status')!='PREPARED_NOT_TRAINED' or m.get('approved_for_training') is not True:
-        raise RuntimeError('BLOCKED: independent variant label review and explicit training approval required')
-    if m['implementation_sha256']!=implementation_sha(a):raise RuntimeError('Implementation changed since dataset preparation')
-    baseline=m['configuration'].copy(); actual=s.configuration(a)
-    if a.command=='verify':
-        for field in ('log_file','log_timestamp'):
-            baseline.pop(field,None);actual.pop(field,None)
-    if baseline!=actual:raise RuntimeError('Shell/CLI values differ from prepared manifest: '+repr([k for k in set(baseline)|set(actual) if baseline.get(k)!=actual.get(k)]))
-    if m['initial_m1']!=audit_m1(a):raise RuntimeError('M1 Adapter was replaced or modified')
+    paths,approval,m=approval_bound_files(a)
+    binding=s.read_json(s.require_file(a.run_dir/'training_approval_binding.json'))
+    if binding.get('approval_sha256')!=approval['prepared_sha256']['manifest.json'] or binding.get('purpose')!=a.purpose:
+        raise RuntimeError('Approval binding changed')
+    if binding.get('prepared_sha256')!=approval['prepared_sha256']:
+        raise RuntimeError('Approval binding content mismatch')
+    for name in paths:
+        if s.sha256(s.require_file(a.prepared_dir/name))!=approval['prepared_sha256'][name]:
+            raise RuntimeError('Prepared dataset bytes changed since approval: '+name)
+    if m['initial_m1']!=audit_m1(a):raise RuntimeError('M1 Adapter changed since preparation')
     if s.sha256(s.require_file(a.staging_manifest))!=m['dataset']['staging_sha256']:
         raise RuntimeError('Source staging manifest drift')
     if s.sha256(s.require_file(m['dataset']['a10_path']))!=m['dataset']['a10_sha256']:
@@ -992,15 +1044,9 @@ def verify_prepared(a):
         raise RuntimeError('Held-out ground-truth drift')
     for c,files in m['dataset']['paths'].items():
         for name,p in files.items():
-            if s.sha256(s.require_file(p))!=m['dataset']['sha256'][c][name]:raise RuntimeError(f'Dataset drift {c}/{name}')
-    if m.get('m1_source_identity',{}).get('status')=='PASS':
-        check=s.require_file(m['m1_source_identity']['m1_prepared_train_path'])
-        if s.sha256(check)!=m['m1_source_identity']['m1_prepared_train_sha256']:
-            raise RuntimeError('M1 original selected source samples changed')
-    for split in ('train','validation'):
-        if s.sha256(s.require_file(a.prepared_dir/(split+'.jsonl')))!=m['sample'][split]['sha256']:
-            raise RuntimeError('Prepared selected pairs changed')
-    return m,path
+            if s.sha256(s.require_file(p))!=m['dataset']['sha256'][c][name]:
+                raise RuntimeError(f'Dataset drift {c}/{name}')
+    return m,a.prepared_dir/'manifest.json'
 
 
 def run_worker(a):
@@ -1080,12 +1126,14 @@ def run_finalize(a):
         if s.sha256(s.require_file(a.adapter_dir/name))!=digest:raise RuntimeError('Adapter weight/checksum mismatch '+name)
     if summ['initial_m1_sha256']!=m['initial_m1']['adapter_model_sha256']:
         raise RuntimeError('M1 adapter SHA changed')
-    status='F01C_V11_SMOKE_PASS' if a.purpose=='smoke' else 'F01C_V11_M2_TRAINING_COMPLETE'
+    status='F01C_V24_SMOKE_PASS' if a.purpose=='smoke' else 'F01C_V24_M2_TRAINING_COMPLETE'
     rec={'version':VERSION,'status':status,'created_at_chicago':s.chicago_now(),
          'model_id':a.model_id,'model_revision':a.model_revision,'model_mode':a.model_mode,
          'initial_adapter_sha256':m['initial_m1']['adapter_model_sha256'],
          'initial_adapter':m['initial_m1']['adapter'],
          'compatibility_signature':m['compatibility_signature'],'prepared_manifest_sha256':s.sha256(path),
+         'approved_manifest_sha256':s.read_json(a.run_dir/'training_approval_binding.json')['prepared_sha256']['manifest.json'],
+         'approval_sha256':s.read_json(a.run_dir/'training_approval_binding.json')['approval_sha256'],
          'training_summary_sha256':s.sha256(a.run_dir/'training_summary.json'),
          'adapter_sha256':summ['adapter_sha256'],'adapter':str(a.adapter_dir),'run':str(a.run_dir),
          'train_pair_ids_sha256':m['sample']['train']['pair_ids_sha256'],
@@ -1106,4 +1154,4 @@ def run_verify(a):
         raise RuntimeError('Training summary hash mismatch')
     for name,digest in r['adapter_sha256'].items():
         if s.sha256(s.require_file(a.adapter_dir/name))!=digest:raise RuntimeError('Adapter hash mismatch '+name)
-    print(json.dumps({'status':'F01C_V11_VERIFY_PASS','run':str(a.run_dir),'adapter':str(a.adapter_dir)}),flush=True)
+    print(json.dumps({'status':'F01C_V24_VERIFY_PASS','run':str(a.run_dir),'adapter':str(a.adapter_dir)}),flush=True)

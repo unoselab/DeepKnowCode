@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids
-VERSION = 'v18'
+VERSION = 'v24'
 
 def chicago_now():
     return datetime.now(ZoneInfo('America/Chicago')).isoformat()
@@ -224,6 +224,7 @@ def make_training_arguments(args, checkpoints):
         logging_steps=args.log_steps,
         logging_first_step=args.logging_first_step, report_to=args.report_to,
         save_strategy=args.save_strategy, save_steps=args.eval_steps,
+        eval_steps=args.eval_steps,
         save_total_limit=(None if args.save_total_limit == 0 else args.save_total_limit),
         load_best_model_at_end=args.load_best_model_at_end,
         metric_for_best_model=args.metric_for_best_model,

@@ -1,67 +1,24 @@
 #!/usr/bin/env bash
-# F-01c v18: standalone multi-LLM M2 standard mixed LoRA entrypoint.
-# All experiment-specific configuration lives in THIS shell script.
-# No calls to A-11/E-01b/D-03a shell wrappers.
-#
-# REPRODUCIBLE EXECUTION GUIDE (run from DeepKnowCode repository root)
-#
-# Step 1 - Preflight (read-only)
+# F-01c v24: standalone Frozen M2 standard mixed LoRA runner.
+# REPRODUCIBLE RUN STEPS (from DeepKnowCode repository root):
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --preflight
-#
-# Optional diagnostics (read-only; use when diagnosing source/eligibility issues)
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-eligibility
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-comments
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-pool-truncation
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-syntax-truncation
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-bcb-original
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-java-exclusions
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-tail-truncation
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-structural-truncation
-#
-# Step 2 - Audit the pinned structural proposals (read-only)
-# F01C_FEASIBILITY_SOURCE_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-034414-structural-audit" \
-#   bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-dataset-feasibility
-# Verify the audit selected 1,866 Java negatives / 19,464 train / 512 validation;
-# independently review transformed negative labels before approving training.
-#
-# Step 3 - Prepare dataset (NO GPU training; still pending label review)
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --prepare
-# F01C_FEASIBILITY_SOURCE_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-034414-structural-audit" \
-#   bash src/sh2/f-01c-train-standard-mixed-lora.sh --prepare
-# Inspect prepared/manifest.json, train.jsonl, validation.jsonl in the new run.
-#
-
-# F01C_PREPARED_REVIEW_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-115525-prepare" \
-# F01C_LABEL_REVIEW_DECISIONS="$PWD/results/f-01c/codellama-7b/2026-1112-120407-1794506647-222708-label-review-export/label_review_decisions.json" \
-# bash src/sh2/f-01c-review-labels.sh verify
-
-# Step 4 - 3-GPU DDP Smoke Test (CURRENTLY BLOCKED until label approval)
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --smoke
-#
-# Step 5 - Full Frozen M2 Training (CURRENTLY BLOCKED until label approval)
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --train
-#
-# Step 6 - Verify an EXISTING completed smoke/train run (read-only)
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh --verify results/f-01c/codellama-7b/<timestamp>-train
-# bash src/sh2/f-01c-train-standard-mixed-lora.sh \
-#   --verify "results/f-01c/codellama-7b/<timestamp>-train"
-#
-# Model change example:
-# F01C_MODEL_MODE=starcoder2-7b bash src/sh2/f-01c-train-standard-mixed-lora.sh --preflight
-# For StarCoder2, explicitly set F01C_M1_ADAPTER, F01C_M1_ADAPTER_SHA256,
-# and F01C_M1_MANIFEST_FILE. Never initialize M2 from an M2/M3 adapter.
-# Prerequisites: approved C-10 corpus, source data, frozen M1 adapter,
-# cached pinned base model, and three BF16 GPUs for future training.
-# Logs: logs/f-01c/MODE/ (America/Chicago timestamps, tee, no overwrite).
-# Results: results/f-01c/MODE/ (unique run directory per invocation).
-# NOTE: v18 adds a separate manual label review command; training approval remains gated.
-# F01C_PREPARED_REVIEW_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-115525-prepare" \
-#   bash src/sh2/f-01c-review-labels.sh export
-# Edit the generated label_review_decisions.json: set all 8 decisions to NON_CLONE
-# only after inspecting full effective Code A/B and the removed statements.
-# F01C_PREPARED_REVIEW_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-115525-prepare" \
-# F01C_LABEL_REVIEW_DECISIONS="/absolute/path/label_review_decisions.json" \
-#   bash src/sh2/f-01c-review-labels.sh verify
+# bash src/sh2/f-01c-train-standard-mixed-lora.sh --verify results/f-01c/codellama-7b/<run>-train
+# Optional diagnostics: --audit-eligibility, --audit-comments, --audit-pool-truncation,
+# --audit-syntax-truncation, --audit-bcb-original, --audit-java-exclusions,
+# --audit-tail-truncation, --audit-structural-truncation, --audit-dataset-feasibility.
+# Reproduce dataset preparation ONLY for a separate experiment; historical v17
+# prepared bytes are pinned and NOT regenerated for --smoke or --train:
+# F01C_FEASIBILITY_SOURCE_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-034414-structural-audit" \
+# bash src/sh2/f-01c-train-standard-mixed-lora.sh --prepare
+# The 8 transformed negative labels were already user-reviewed (v20).
+# There is NO approval file, approval command, or reviewer environment variable
+# needed for smoke/train. The frozen prepared SHA256 pins are REQUIRED.
+# All experiment parameters live in this shell; Python only implements them.
+# Standalone: does not call any other experiment shell wrapper.
+# Logs: America/Chicago, unique filenames, stdout+stderr tee, pipefail.
+# Results: unique run directory, never clobber existing results.
 set -Eeuo pipefail
 export TZ=America/Chicago
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
@@ -125,6 +82,11 @@ M1_SOURCE_IDENTITY_POLICY="strict-full-only"
 PREPARED_POLICY="fresh-frozen-m2"  # F-01d must use F-01c prepared train/validation byte-identically.
 DATASET_C10_EXPECTED_SHA256="da8fdd6362df692e225a5bf5b72278fd6211cef75e48e6a539dda637b76a1843:e8c8998f2e73a3587190904fb258ac1ccda306f0be62dec499622f4258603693:33c5a0506fdbbd8ff5f9604a9be1d4fba1b6b6d52943ff11ff53928861ac48a7"
 SOURCE_PAIR_IDS_SHA256="${F01C_SOURCE_PAIR_IDS_SHA256:-unverified}"
+# v17 verified dataset identity. These three values are not optional runtime flags.
+FROZEN_PREPARED_RUN="$ROOT/results/f-01c/codellama-7b/2026-1112-115525-prepare"
+FROZEN_TRAIN_SHA256="e2ec9d2cccc0adb0b73f81f60b3041b5a7f4fa519729f501c1cdc583c1e9b564"
+FROZEN_VALIDATION_SHA256="4404f90262c1021917ce31f0c454f87a5a634a0875307b8e84bbd51abefc752a"
+FROZEN_MANIFEST_SHA256="149b9439b8eeb2d5dbdf81931cd621b962e02066de0467ab330ce2a7fd933579"
 
 # -------- 2. Common dataset, tokenizer, selection --------
 SOURCE_CORPUS="java_source"
@@ -200,7 +162,7 @@ BCB_MAX_CODE_MAP_BYTES=500000000
 BCB_SHORTLIST_SIZE=256
 BCB_MAX_REPORT_CANDIDATES=256
 FEASIBILITY_POLICY='deterministic-training-feasibility-explicit-variants-v2'
-FEASIBILITY_SOURCE_RUN="${F01C_FEASIBILITY_SOURCE_RUN:-newest-valid}"
+FEASIBILITY_SOURCE_RUN="$ROOT/results/f-01c/codellama-7b/2026-1112-034414-structural-audit"
 STRUCTURAL_TRUNCATION_POLICY='java-switch-case-group-and-nested-tail-two-sided-review-v2'
 STRUCTURAL_MAX_CASE_GROUPS=32
 TWO_SIDE_MAX_CANDIDATES_PER_SIDE=24
@@ -257,11 +219,8 @@ case "$MODE" in
   --audit-tail-truncation) PURPOSE="tail-audit" ;;
   --audit-structural-truncation) PURPOSE="structural-audit" ;;
   --audit-dataset-feasibility) PURPOSE="feasibility-audit" ;;
-  --smoke|--train)
-    echo 'BLOCKED F-01c v18: variant labels pending independent review; training is not approved.' >&2
-    echo 'Use --prepare to stage the selected 19,464 training pairs without starting GPUs.' >&2
-    exit 2
-    ;;
+  --smoke) PURPOSE="smoke" ;;
+  --train) PURPOSE="train" ;;
   --verify)
     [[ $# -eq 1 ]] || { echo 'Usage: --verify /path/to/completed-run' >&2; exit 2; }
     VERIFY_RUN="$1"; shift
@@ -277,17 +236,19 @@ case "$MODE" in
 esac
 [[ $# -eq 0 ]] || { echo 'Unexpected command arguments' >&2; exit 2; }
 if [[ "$PURPOSE" == "smoke" ]]; then
-  TRAIN_EXAMPLES=48
-  JAVA_TARGET_TRAIN=24
-  PYTHON_TARGET_TRAIN=24
-  SOURCE_VAL=16
-  JAVA_TARGET_VAL=8
-  PYTHON_TARGET_VAL=8
-  VAL_EXAMPLES=32
+  # Same FULL prepared dataset; only the optimizer schedule differs in smoke.
   MAX_STEPS=2
   EVAL_STEPS=1
   LOG_STEPS=1
   WARMUP_STEPS=0
+fi
+APPROVED_PREPARED_RUN="$FROZEN_PREPARED_RUN"
+TRAINING_APPROVAL_REPORT=""
+SMOKE_SUCCESS_RUN=""
+if [[ "$MODE" == --smoke || "$MODE" == --train || "$MODE" == --verify ]]; then
+  [[ -d "$APPROVED_PREPARED_RUN/prepared" ]] || {
+    echo "BLOCKED: frozen v17 prepared dataset not found: $APPROVED_PREPARED_RUN" >&2; exit 2;
+  }
 fi
 IFS=',' read -r -a GPU_ID_ARRAY <<< "$GPU_IDS"
 [[ "${#GPU_ID_ARRAY[@]}" -eq "$EXPECTED_WORLD_SIZE" ]] || { echo 'GPU list length differs from expected world' >&2; exit 2; }
@@ -305,11 +266,12 @@ export OMP_NUM_THREADS="${F01C_OMP_NUM_THREADS:-4}"
 # -------- 5. Chicago timestamp, unique no-clobber logs/results --------
 LOG_DIR="$ROOT/logs/f-01c/$MODEL_MODE"
 RESULTS_DIR="$ROOT/results/f-01c/$MODEL_MODE"
-LOG_PREFIX="f-01c-v17"
+LOG_PREFIX="f-01c-v24"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 CHICAGO_TIMESTAMP="$(TZ=America/Chicago date "$LOG_TIMESTAMP_FORMAT")"
 mkdir -p "$LOG_DIR" "$RESULTS_DIR"
-LOG_FILE="$LOG_DIR/$LOG_PREFIX-$MODEL_MODE-${MODE#--}-$CHICAGO_TIMESTAMP.log"
+UNIQUE_RUN_ID="$(date +%s)-$$-${RANDOM}"
+LOG_FILE="$LOG_DIR/$LOG_PREFIX-$MODEL_MODE-${MODE#--}-$CHICAGO_TIMESTAMP-$UNIQUE_RUN_ID.log"
 if ! ( set -o noclobber; : > "$LOG_FILE" ) 2>/dev/null; then
   echo "ERROR: Refusing to overwrite existing log: $LOG_FILE" >&2
   exit 2
@@ -317,7 +279,7 @@ fi
 if [[ "$MODE" == --verify ]]; then
   RUN_DIR="$VERIFY_RUN"
 else
-  RUN_DIR="$RESULTS_DIR/$CHICAGO_TIMESTAMP-$PURPOSE"
+  RUN_DIR="$RESULTS_DIR/$CHICAGO_TIMESTAMP-$UNIQUE_RUN_ID-$PURPOSE"
   [[ ! -e "$RUN_DIR" ]] || { echo "Run already exists: $RUN_DIR" | tee -a "$LOG_FILE" >&2; exit 2; }
 fi
 
@@ -363,6 +325,12 @@ COMMON=(
   --bcb-shortlist-size "$BCB_SHORTLIST_SIZE"
   --bcb-max-report-candidates "$BCB_MAX_REPORT_CANDIDATES"
   --exclusion-max-examples "$EXCLUSION_MAX_EXAMPLES"
+  --frozen-train-sha256 "$FROZEN_TRAIN_SHA256"
+  --frozen-validation-sha256 "$FROZEN_VALIDATION_SHA256"
+  --frozen-manifest-sha256 "$FROZEN_MANIFEST_SHA256"
+  --approved-prepared-run "$APPROVED_PREPARED_RUN"
+  --training-approval-report "$TRAINING_APPROVAL_REPORT"
+  --smoke-success-run "$SMOKE_SUCCESS_RUN"
   --feasibility-source-run "$FEASIBILITY_SOURCE_RUN"
   --feasibility-policy "$FEASIBILITY_POLICY"
   --structural-truncation-policy "$STRUCTURAL_TRUNCATION_POLICY"
@@ -411,16 +379,16 @@ COMMON=(
 finish() {
   local rc=$?
   trap - EXIT
-  printf '[F-01c v18] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
+  printf '[F-01c v24] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
     "$rc" "$MODEL_MODE" "$MODE" "$(TZ=America/Chicago date -Is)" "$LOG_FILE" "$RUN_DIR" | tee -a "$LOG_FILE"
   exit "$rc"
 }
 trap finish EXIT
 {
-  printf '[F-01c v18] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
+  printf '[F-01c v24] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
     "$MODE" "$MODEL_MODE" "$MODEL_ID" "$MODEL_REVISION" "$(TZ=America/Chicago date -Is)"
-  printf '[F-01c v18] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
-  printf '[F-01c v18] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
+  printf '[F-01c v24] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
+  printf '[F-01c v24] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
     "$TRAIN_EXAMPLES" "$JAVA_TARGET_TRAIN" "$PYTHON_TARGET_TRAIN" "$VAL_EXAMPLES" "$MAX_STEPS" \
     "$(( PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * EXPECTED_WORLD_SIZE ))" "$TOKEN_POLICY"
   case "$MODE" in
@@ -458,7 +426,7 @@ trap finish EXIT
       "$PYTHON_BIN" -u "$PYFILE" prepare "${COMMON[@]}"
       ;;
     --smoke|--train)
-      "$PYTHON_BIN" -u "$PYFILE" prepare "${COMMON[@]}"
+      "$PYTHON_BIN" -u "$PYFILE" stage-approved "${COMMON[@]}"
       "$PYTHON_BIN" -u -m torch.distributed.run --standalone \
         --nproc_per_node="$EXPECTED_WORLD_SIZE" "$PYFILE" worker "${COMMON[@]}"
       "$PYTHON_BIN" -u "$PYFILE" finalize "${COMMON[@]}"
