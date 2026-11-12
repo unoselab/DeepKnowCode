@@ -32,10 +32,7 @@
 #
 
 # F01C_PREPARED_REVIEW_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-115525-prepare" \
-# bash src/sh2/f-01c-review-labels.sh export
-
-# F01C_PREPARED_REVIEW_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-115525-prepare" \
-# F01C_LABEL_REVIEW_DECISIONS="/absolute/path/label_review_decisions.json" \
+# F01C_LABEL_REVIEW_DECISIONS="$PWD/results/f-01c/codellama-7b/2026-1112-120407-1794506647-222708-label-review-export/label_review_decisions.json" \
 # bash src/sh2/f-01c-review-labels.sh verify
 
 # Step 4 - 3-GPU DDP Smoke Test (CURRENTLY BLOCKED until label approval)

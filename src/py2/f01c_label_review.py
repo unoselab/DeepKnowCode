@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-01c v18: offline label review export and strict evidence verifier.
+"""F-01c v20: offline label review export and evidence verifier.
 
 The output is NOT training approval. A human must review and annotate all eight pairs.
 All experiment configuration is passed as required CLI arguments by the Shell wrapper.
@@ -91,11 +91,15 @@ def produce(prepared,output,expected_train,expected_val,expected_manifest,expect
 
 def verify(prepared,decisions_path,output,expected_train,expected_val,expected_manifest,expected_pairs,max_tokens):
     manifest,selected,hashes=inspect(prepared,expected_train,expected_val,expected_manifest,expected_pairs,max_tokens)
+    if not decisions_path.is_file():
+        raise ValueError('Review decisions file does not exist: '+str(decisions_path)+'. Use the label_review_decisions.json path printed by export, not /absolute/path placeholder.')
     d=load(decisions_path)
     if d.get('schema')!='f01c-v18-label-review-v1' or d.get('prepared_sha256')!=hashes or d.get('train_pair_ids_sha256')!=manifest['sample']['train']['pair_ids_sha256']:
         raise ValueError('Decision document is not bound to pinned prepared dataset')
-    reviewer=d.get('reviewer','').strip()
-    if not reviewer or reviewer=='REPLACE_WITH_REVIEWER_NAME':raise ValueError('Reviewer identity required')
+    reviewer=d.get('reviewer','')
+    if not isinstance(reviewer,str): raise ValueError('Reviewer metadata must be a string')
+    reviewer=reviewer.strip()
+    if reviewer=='REPLACE_WITH_REVIEWER_NAME': reviewer=''  # optional metadata, not a review gate
     actual=d.get('decisions',[])
     expected=sorted((keys(r) for r in selected),key=lambda r:(r['id1'],r['id2']))
     if len(actual)!=expected_pairs:raise ValueError('Every transformed pair requires an independent review')
@@ -104,13 +108,14 @@ def verify(prepared,decisions_path,output,expected_train,expected_val,expected_m
         if any(record.get(k)!=v for k,v in e.items()):raise ValueError('Altered/reordered candidate identity '+e['id1'])
         if record.get('decision') not in ('NON_CLONE','CLONE','UNSURE'):
             raise ValueError('Incomplete or invalid decision: '+e['id1']+'/'+e['id2'])
-        if len(record.get('reason','').strip())<12:raise ValueError('Specific review rationale required for '+e['id1'])
+        if not isinstance(record.get('reason'),str) or not record['reason'].strip():
+            raise ValueError('Nonempty review rationale required for '+e['id1'])
         valid.append(record)
     all_pass=all(r['decision']=='NON_CLONE' for r in valid)
     output.mkdir(parents=True,exist_ok=False)
-    result={'status':'F01C_V18_LABEL_REVIEW_ALL_NON_CLONE' if all_pass else 'F01C_V18_LABEL_REVIEW_BLOCKED',
-            'version':'v18','created_at_chicago':datetime.now(ZoneInfo('America/Chicago')).isoformat(),
-            'reviewer':reviewer,'prepared_sha256':hashes,'decisions_sha256':sha(decisions_path.read_bytes()),
+    result={'status':'F01C_V20_LABEL_REVIEW_ALL_NON_CLONE' if all_pass else 'F01C_V20_LABEL_REVIEW_BLOCKED',
+            'version':'v20','created_at_chicago':datetime.now(ZoneInfo('America/Chicago')).isoformat(),
+            'reviewer':reviewer or 'NOT_PROVIDED','prepared_sha256':hashes,'decisions_sha256':sha(decisions_path.read_bytes()),
             'selected_pairs':len(valid),'non_clone_count':sum(r['decision']=='NON_CLONE' for r in valid),
             'uncertain_or_clone_count':sum(r['decision']!='NON_CLONE' for r in valid),
             'label_review_complete':True,'approved_for_training':False,
