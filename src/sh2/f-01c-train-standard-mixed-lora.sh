@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# F-01c v3: standalone multi-LLM M2 standard mixed LoRA entrypoint.
+# F-01c v5: standalone multi-LLM M2 standard mixed LoRA entrypoint.
 # All experiment-specific configuration lives in THIS shell script.
 # No calls to A-11/E-01b/D-03a shell wrappers.
 #
@@ -9,6 +9,8 @@
 # Diagnostic - Token Eligibility Audit (read-only)
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-eligibility
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-comments
+# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-pool-truncation
+# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-syntax-truncation
 # Step 2 - Dataset Preparation / Integrity Validation
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --prepare
 # Step 3 - 3-GPU DDP Smoke Test
@@ -141,6 +143,13 @@ PER_DEVICE_BATCH_SIZE=1
 PER_DEVICE_EVAL_BATCH_SIZE=1
 GRADIENT_ACCUMULATION_STEPS=8
 AUDIT_TOKEN_LIMITS=(2048 3072 4096)
+# Candidate discovery is confined to the original repository training tree.
+# Change POOL_DISCOVERY_ROOT only to a subdirectory of data/training.
+POOL_DISCOVERY_ROOT="$ROOT/data/training"
+POOL_DISCOVERY_GLOBS=('**/train.txt' '**/*train*.txt')
+POOL_DISCOVERY_MAX_FILES=1000
+SYNTAX_TRUNCATION_POLICY="tree-sitter-java-statement-review-v1"
+SYNTAX_MAX_STATEMENTS_PER_PAIR=96
 COMMENT_REMOVAL_POLICY="java-lexer-preserve-literals-v1"  # Diagnostic only; never overrides MAX_SEQ_LENGTH.
 MAX_STEPS=811
 EVAL_STEPS=811
@@ -182,6 +191,8 @@ case "$MODE" in
   --prepare) PURPOSE="prepare" ;;
   --audit-eligibility) PURPOSE="audit" ;;
   --audit-comments) PURPOSE="comment-audit" ;;
+  --audit-pool-truncation) PURPOSE="recovery-audit" ;;
+  --audit-syntax-truncation) PURPOSE="syntax-audit" ;;
   --smoke) PURPOSE="smoke" ;;
   --train) PURPOSE="train" ;;
   --verify)
@@ -195,7 +206,7 @@ case "$MODE" in
       *) echo 'Run directory must end with -smoke or -train' >&2; exit 2 ;;
     esac
     ;;
-  *) echo 'Usage: --preflight|--audit-eligibility|--audit-comments|--prepare|--smoke|--train|--verify RUN_DIR' >&2; exit 2 ;;
+  *) echo 'Usage: --preflight|--audit-eligibility|--audit-comments|--audit-pool-truncation|--audit-syntax-truncation|--prepare|--smoke|--train|--verify RUN_DIR' >&2; exit 2 ;;
 esac
 [[ $# -eq 0 ]] || { echo 'Unexpected command arguments' >&2; exit 2; }
 if [[ "$PURPOSE" == "smoke" ]]; then
@@ -227,7 +238,7 @@ export OMP_NUM_THREADS="${F01C_OMP_NUM_THREADS:-4}"
 # -------- 5. Chicago timestamp, unique no-clobber logs/results --------
 LOG_DIR="$ROOT/logs/f-01c/$MODEL_MODE"
 RESULTS_DIR="$ROOT/results/f-01c/$MODEL_MODE"
-LOG_PREFIX="f-01c-v3"
+LOG_PREFIX="f-01c-v5"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 CHICAGO_TIMESTAMP="$(TZ=America/Chicago date "$LOG_TIMESTAMP_FORMAT")"
 mkdir -p "$LOG_DIR" "$RESULTS_DIR"
@@ -275,7 +286,11 @@ COMMON=(
   --max-train-examples "$TRAIN_EXAMPLES" --max-val-examples "$VAL_EXAMPLES"
   --java-target-train "$JAVA_TARGET_TRAIN" --python-target-train "$PYTHON_TARGET_TRAIN"
   --source-val "$SOURCE_VAL" --java-target-val "$JAVA_TARGET_VAL" --python-target-val "$PYTHON_TARGET_VAL"
+  --pool-discovery-root "$POOL_DISCOVERY_ROOT" --pool-discovery-globs "${POOL_DISCOVERY_GLOBS[@]}"
+  --pool-discovery-max-files "$POOL_DISCOVERY_MAX_FILES"
   --comment-removal-policy "$COMMENT_REMOVAL_POLICY"
+  --syntax-truncation-policy "$SYNTAX_TRUNCATION_POLICY"
+  --syntax-max-statements-per-pair "$SYNTAX_MAX_STATEMENTS_PER_PAIR"
   --max-seq-length "$MAX_SEQ_LENGTH" --audit-token-limits "${AUDIT_TOKEN_LIMITS[@]}"
   --java-target-seed-offset "$JAVA_TARGET_SEED_OFFSET" --python-target-seed-offset "$PYTHON_TARGET_SEED_OFFSET"
   --sample-rng-label-stride "$SAMPLING_RNG_LABEL_STRIDE"
@@ -312,21 +327,27 @@ COMMON=(
 finish() {
   local rc=$?
   trap - EXIT
-  printf '[F-01c v3] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
+  printf '[F-01c v5] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
     "$rc" "$MODEL_MODE" "$MODE" "$(TZ=America/Chicago date -Is)" "$LOG_FILE" "$RUN_DIR" | tee -a "$LOG_FILE"
   exit "$rc"
 }
 trap finish EXIT
 {
-  printf '[F-01c v3] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
+  printf '[F-01c v5] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
     "$MODE" "$MODEL_MODE" "$MODEL_ID" "$MODEL_REVISION" "$(TZ=America/Chicago date -Is)"
-  printf '[F-01c v3] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
-  printf '[F-01c v3] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
+  printf '[F-01c v5] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
+  printf '[F-01c v5] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
     "$TRAIN_EXAMPLES" "$JAVA_TARGET_TRAIN" "$PYTHON_TARGET_TRAIN" "$VAL_EXAMPLES" "$MAX_STEPS" \
     "$(( PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * EXPECTED_WORLD_SIZE ))" "$TOKEN_POLICY"
   case "$MODE" in
     --preflight)
       "$PYTHON_BIN" -u "$PYFILE" preflight "${COMMON[@]}"
+      ;;
+    --audit-syntax-truncation)
+      "$PYTHON_BIN" -u "$PYFILE" audit-syntax-truncation "${COMMON[@]}"
+      ;;
+    --audit-pool-truncation)
+      "$PYTHON_BIN" -u "$PYFILE" audit-pool-truncation "${COMMON[@]}"
       ;;
     --audit-comments)
       "$PYTHON_BIN" -u "$PYFILE" audit-comments "${COMMON[@]}"

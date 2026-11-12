@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-01c v3 multi-LLM M2 standard mixed LoRA entrypoint.
+"""F-01c v5 multi-LLM M2 standard mixed LoRA entrypoint.
 
 All model-specific and experiment-specific settings are required CLI arguments
 passed explicitly from the standalone F-01c Shell launcher. No silent defaults.
@@ -21,7 +21,7 @@ def strict_boolean(raw):
 
 def parser_factory():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('command', choices=('preflight', 'prepare', 'worker', 'finalize', 'verify', 'audit-eligibility', 'audit-comments'))
+    p.add_argument('command', choices=('preflight', 'prepare', 'worker', 'finalize', 'verify', 'audit-eligibility', 'audit-comments', 'audit-pool-truncation', 'audit-syntax-truncation'))
     for name in (
         'm1-source-identity-policy', 'model-mode', 'model-id', 'model-revision', 'model-family', 'expected-model-type',
         'token-policy', 'expected-yes-token', 'expected-no-token', 'target-modules',
@@ -62,7 +62,12 @@ def parser_factory():
         'full-determinism', 'bf16-full-eval',
     ):
         p.add_argument('--' + name, type=strict_boolean, required=True)
+    p.add_argument('--pool-discovery-root', required=True, type=Path)
+    p.add_argument('--pool-discovery-globs', nargs='+', required=True)
+    p.add_argument('--pool-discovery-max-files', required=True, type=int)
     p.add_argument('--comment-removal-policy', required=True)
+    p.add_argument('--syntax-truncation-policy', required=True)
+    p.add_argument('--syntax-max-statements-per-pair', required=True, type=int)
     p.add_argument('--audit-token-limits', type=int, nargs='+', required=True)
     return p
 
@@ -82,11 +87,16 @@ def main():
     args.heldout_java_codes = args.heldout_java_codes.expanduser().resolve()
     args.heldout_python_codes = args.heldout_python_codes.expanduser().resolve()
     args.hf_home = args.hf_home.expanduser().resolve()
+    args.pool_discovery_root = args.pool_discovery_root.expanduser().resolve()
     args.prepared_dir = args.prepared_dir.expanduser().resolve()
     args.adapter_dir = args.adapter_dir.expanduser().resolve()
     args.checkpoint_dir = args.checkpoint_dir.expanduser().resolve()
     core.validate_args(args)
-    if args.command == 'audit-comments':
+    if args.command == 'audit-syntax-truncation':
+        core.run_audit_syntax_truncation(args)
+    elif args.command == 'audit-pool-truncation':
+        core.run_audit_recovery(args)
+    elif args.command == 'audit-comments':
         core.run_audit_comments(args)
     elif args.command == 'audit-eligibility':
         core.run_audit_eligibility(args)
@@ -108,5 +118,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        print(f'[F-01c v3] ERROR {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
+        print(f'[F-01c v5] ERROR {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
         raise
