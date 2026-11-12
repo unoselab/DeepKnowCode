@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# F-01c v14: standalone multi-LLM M2 standard mixed LoRA entrypoint.
+# F-01c v15: standalone multi-LLM M2 standard mixed LoRA entrypoint.
 # All experiment-specific configuration lives in THIS shell script.
 # No calls to A-11/E-01b/D-03a shell wrappers.
 #
@@ -172,7 +172,7 @@ BCB_MAX_ROWS_PER_FILE=1200000
 BCB_MAX_CODE_MAP_BYTES=500000000
 BCB_SHORTLIST_SIZE=256
 BCB_MAX_REPORT_CANDIDATES=256
-FEASIBILITY_POLICY='deterministic-training-feasibility-review-v1'
+FEASIBILITY_POLICY='deterministic-training-feasibility-explicit-variants-v2'
 FEASIBILITY_SOURCE_RUN="${F01C_FEASIBILITY_SOURCE_RUN:-newest-valid}"
 STRUCTURAL_TRUNCATION_POLICY='java-switch-case-group-and-nested-tail-two-sided-review-v2'
 STRUCTURAL_MAX_CASE_GROUPS=32
@@ -275,7 +275,7 @@ export OMP_NUM_THREADS="${F01C_OMP_NUM_THREADS:-4}"
 # -------- 5. Chicago timestamp, unique no-clobber logs/results --------
 LOG_DIR="$ROOT/logs/f-01c/$MODEL_MODE"
 RESULTS_DIR="$ROOT/results/f-01c/$MODEL_MODE"
-LOG_PREFIX="f-01c-v14"
+LOG_PREFIX="f-01c-v15"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 CHICAGO_TIMESTAMP="$(TZ=America/Chicago date "$LOG_TIMESTAMP_FORMAT")"
 mkdir -p "$LOG_DIR" "$RESULTS_DIR"
@@ -381,16 +381,16 @@ COMMON=(
 finish() {
   local rc=$?
   trap - EXIT
-  printf '[F-01c v14] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
+  printf '[F-01c v15] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
     "$rc" "$MODEL_MODE" "$MODE" "$(TZ=America/Chicago date -Is)" "$LOG_FILE" "$RUN_DIR" | tee -a "$LOG_FILE"
   exit "$rc"
 }
 trap finish EXIT
 {
-  printf '[F-01c v14] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
+  printf '[F-01c v15] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
     "$MODE" "$MODEL_MODE" "$MODEL_ID" "$MODEL_REVISION" "$(TZ=America/Chicago date -Is)"
-  printf '[F-01c v14] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
-  printf '[F-01c v14] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
+  printf '[F-01c v15] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
+  printf '[F-01c v15] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
     "$TRAIN_EXAMPLES" "$JAVA_TARGET_TRAIN" "$PYTHON_TARGET_TRAIN" "$VAL_EXAMPLES" "$MAX_STEPS" \
     "$(( PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * EXPECTED_WORLD_SIZE ))" "$TOKEN_POLICY"
   case "$MODE" in

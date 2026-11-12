@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-01c v14 multi-LLM M2 standard mixed LoRA entrypoint.
+"""F-01c v15 multi-LLM M2 standard mixed LoRA entrypoint.
 
 All model-specific and experiment-specific settings are required CLI arguments
 passed explicitly from the standalone F-01c Shell launcher. No silent defaults.
@@ -143,5 +143,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        print(f'[F-01c v14] ERROR {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
+        print(f'[F-01c v15] ERROR {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
         raise

@@ -17,7 +17,7 @@ import f01c_shared as s
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids, contextual_continuation
 from f01c_comments import POLICY as COMMENT_POLICY, UnsafeJavaLexing, strip_java_comments
 
-VERSION = 'v14'
+VERSION = 'v15'
 CORPORA = ('java_source', 'java_mixed', 'python_mixed')
 
 
@@ -113,7 +113,7 @@ def arg_validate(a):
             or not 1 <= a.two_side_max_candidates_per_side <= 128
             or not 1 <= a.two_side_max_combinations <= 16384):
         raise ValueError('Invalid shell-defined structural truncation policy or bounds')
-    if a.feasibility_policy != 'deterministic-training-feasibility-review-v1' or not a.feasibility_source_run:
+    if a.feasibility_policy != 'deterministic-training-feasibility-explicit-variants-v2' or not a.feasibility_source_run:
         raise ValueError('Invalid feasibility policy or source audit location')
     if a.exclusion_max_examples < 0 or a.exclusion_max_examples > 100:
         raise ValueError('Invalid shell-defined exclusion example cap')

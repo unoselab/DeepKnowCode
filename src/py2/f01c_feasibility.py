@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only deterministic F-01c v14 train/validation feasibility reconstruction.
+"""Read-only deterministic F-01c v15 train/validation feasibility reconstruction.
 
 NEVER modifies the clean corpora, prepared samples, adapter, or training pipeline.
 Transformation changes program behavior; negative labels require independent review.
@@ -14,7 +14,7 @@ import f01c_shared as s
 from f01c_syntax_audit import parse_java, require_parser, token_count, sha_text
 from f01c_variants import contextual_continuation
 
-POLICY = 'deterministic-training-feasibility-review-v1'
+POLICY = 'deterministic-training-feasibility-explicit-variants-v2'
 
 
 def discover_source(results_dir, configured):
@@ -92,22 +92,60 @@ def verify_proposals(folder, report, codes, data_sha, max_seq_length, tok, args,
                                          len(r['changed_sides']),r['id1'],r['id2']))
 
 
+def variant_code_id(original_id, code, original_code):
+    """Never overload an original source ID with changed bytes.
+
+    The suffix identifies the concrete code instance; original_id is retained in
+    the pair for train/validation ancestry checks and split provenance.
+    """
+    if code == original_code:
+        return original_id
+    return original_id + '@trunc-' + sha_text(code)
+
+
+def add_variant_metadata(row, codes):
+    """Return a detached row with explicit immutable code-instance identities."""
+    r = dict(row)
+    code_a = row.get('a', codes[row['id1']])
+    code_b = row.get('b', codes[row['id2']])
+    id_a = variant_code_id(row['id1'], code_a, codes[row['id1']])
+    id_b = variant_code_id(row['id2'], code_b, codes[row['id2']])
+    r['code_instance_id1'] = id_a
+    r['code_instance_id2'] = id_b
+    r['variant_parent_id1'] = row['id1']
+    r['variant_parent_id2'] = row['id2']
+    r['code_instance_sha256'] = {'A': sha_text(code_a), 'B': sha_text(code_b)}
+    return r
+
+
 def candidate_checks(selected, validation, proposals, codes, heldout_hashes, source_hashes):
-    """Report endpoint and modified-code consistency; never silently certify labels."""
-    train_ids={idx for r in selected for idx in (r['id1'],r['id2'])}
-    val_ids={idx for r in validation for idx in (r['id1'],r['id2'])}
-    endpoint_overlap=sorted(train_ids & val_ids)
-    assigned={};conflicts=[];pair_fingerprints=set();pair_duplicates=[]
+    """Use variant IDs for byte identity and parent IDs for split isolation."""
+    train_parents={idx for r in selected for idx in (r['id1'],r['id2'])}
+    val_parents={idx for r in validation for idx in (r['id1'],r['id2'])}
+    endpoint_overlap=sorted(train_parents & val_parents)
+    assigned={}; conflicts=[]; pair_fingerprints=set(); pair_duplicates=[]
+    missing_variant_provenance=[]; malformed_variant_ids=[]
     for r in selected:
-        for idx,code in ((r['id1'],r.get('a',codes[r['id1']])),(r['id2'],r.get('b',codes[r['id2']]))):
+        pair=(r['id1'],r['id2'],r['label'])
+        if pair in pair_fingerprints:pair_duplicates.append(pair)
+        pair_fingerprints.add(pair)
+        for side,parent,code in (
+            ('1',r['id1'],r.get('a',codes[r['id1']])),
+            ('2',r['id2'],r.get('b',codes[r['id2']]))):
+            instance=r.get('code_instance_id'+side)
+            expected=variant_code_id(parent,code,codes[parent])
+            if instance is None:
+                missing_variant_provenance.append(parent)
+                continue
+            if instance != expected or r.get('variant_parent_id'+side)!=parent:
+                malformed_variant_ids.append(parent)
             sha=sha_text(code)
-            if idx in assigned and assigned[idx]!=sha:conflicts.append(idx)
-            assigned[idx]=sha
-        key=(r['id1'],r['id2'],r['label'])
-        if key in pair_fingerprints:pair_duplicates.append(key)
-        pair_fingerprints.add(key)
+            if instance in assigned and assigned[instance]!=sha:conflicts.append(instance)
+            assigned[instance]=sha
     return {'train_validation_endpoint_overlap_ids':endpoint_overlap,
             'train_endpoint_conflicting_code_ids':sorted(set(conflicts)),
+            'missing_variant_provenance':sorted(set(missing_variant_provenance)),
+            'malformed_variant_ids':sorted(set(malformed_variant_ids)),
             'duplicate_train_pairs':pair_duplicates,
             'selected_modified_heldout_collisions':sum(
                 s.code_hash(code) in heldout_hashes
@@ -140,30 +178,23 @@ def select_java(args,codes,source_hashes,tok,answer_ids,proposals,heldout_hashes
     remaining=[p for p in proposals if (p['id1'],p['id2']) not in original_set]
     need=args.java_target_train//2
     # Same original shuffled sequence as select_domain; append ranked transformations as fallback.
-    chosen=baseline[:need]
-    assigned_original={idx:sha_text(codes[idx]) for r in chosen for idx in (r['id1'],r['id2'])}
-    assigned_modified={}
-    rejected_conflicting=[]
+    chosen=[add_variant_metadata(r,codes) for r in baseline[:need]]
     replacement=[]
     for p in remaining:
         if len(chosen)>=need:break
-        side_data=((p['id1'],p['a']),(p['id2'],p['b']))
-        if any((idx in assigned_original and assigned_original[idx]!=sha_text(code))
-               or (idx in assigned_modified and assigned_modified[idx]!=sha_text(code))
-               for idx,code in side_data):
-            rejected_conflicting.append([p['id1'],p['id2']]);continue
         replacement_row={'id1':p['id1'],'id2':p['id2'],'label':0,'tokens':p['tokens'],
                          'origin':'structural-v13','a':p['a'],'b':p['b'],
                          'changed_sides':p['changed_sides'],'removed_count':p['removed_count'],
                          'original_pair_sha256':p['original_pair_sha256']}
-        chosen.append(replacement_row);replacement.append(replacement_row)
-        for idx,code in side_data:assigned_modified[idx]=sha_text(code)
+        variant_row=add_variant_metadata(replacement_row,codes)
+        chosen.append(variant_row)
+        replacement.append(variant_row)
     positive_count=0
     for x,z,y in pool_train[1]:
         if positive_count>=need:break
         n=length(codes[x],codes[z],y)
         if n<=args.max_seq_length:
-            chosen.append({'id1':x,'id2':z,'label':y,'tokens':n,'origin':'original'})
+            chosen.append(add_variant_metadata({'id1':x,'id2':z,'label':y,'tokens':n,'origin':'original'},codes))
             positive_count+=1
     counts=Counter(r['label'] for r in chosen)
     train_ids={idx for r in chosen for idx in (r['id1'],r['id2'])}
@@ -189,7 +220,11 @@ def select_java(args,codes,source_hashes,tok,answer_ids,proposals,heldout_hashes
             'baseline_eligible_negatives':len(baseline),
             'baseline_overlength_negatives':baseline_overlong,
             'proposals_available':len(proposals), 'proposals_selected':len(replacement),
-            'proposals_rejected_endpoint_conflict':rejected_conflicting,
+            'proposals_rejected_endpoint_conflict':[],
+            'variant_identity_policy':'original-function-ancestry-plus-content-addressed-code-instance-v1',
+            'selected_modified_code_instance_count':sum(
+                1 for r in replacement for side in ('1','2')
+                if r['code_instance_id'+side] != r['variant_parent_id'+side]),
             'validation_skips':dict(validation_skips),'checks':issues,
             'quota_feasible_under_review':feasible}
     return report,chosen,validation
