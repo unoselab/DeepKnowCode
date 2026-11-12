@@ -17,7 +17,7 @@ import f01c_shared as s
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids, contextual_continuation
 from f01c_comments import POLICY as COMMENT_POLICY, UnsafeJavaLexing, strip_java_comments
 
-VERSION = 'v13'
+VERSION = 'v14'
 CORPORA = ('java_source', 'java_mixed', 'python_mixed')
 
 
@@ -65,7 +65,7 @@ def arg_validate(a):
         raise ValueError('Held-out overlap check cannot be disabled in M2')
     if a.max_overlap_examples<1 or a.max_train_examples<2 or a.max_val_examples<2:
         raise ValueError('Invalid count or overlap settings')
-    if a.purpose not in ('preflight','prepare','smoke','train','audit','comment-audit','recovery-audit','syntax-audit','bcb-audit','exclusion-audit','tail-audit','structural-audit'):
+    if a.purpose not in ('preflight','prepare','smoke','train','audit','comment-audit','recovery-audit','syntax-audit','bcb-audit','exclusion-audit','tail-audit','structural-audit','feasibility-audit'):
         raise ValueError('Invalid execution purpose')
     if a.adapter_dir!=a.run_dir/'adapter' or a.prepared_dir!=a.run_dir/'prepared' or a.checkpoint_dir!=a.run_dir/'checkpoints':
         raise ValueError('Artifact paths must be under this run directory')
@@ -113,6 +113,8 @@ def arg_validate(a):
             or not 1 <= a.two_side_max_candidates_per_side <= 128
             or not 1 <= a.two_side_max_combinations <= 16384):
         raise ValueError('Invalid shell-defined structural truncation policy or bounds')
+    if a.feasibility_policy != 'deterministic-training-feasibility-review-v1' or not a.feasibility_source_run:
+        raise ValueError('Invalid feasibility policy or source audit location')
     if a.exclusion_max_examples < 0 or a.exclusion_max_examples > 100:
         raise ValueError('Invalid shell-defined exclusion example cap')
     if a.greater_is_better or a.use_cache or a.save_total_limit!=0:
@@ -132,6 +134,7 @@ def implementation_sha(a):
         a.root/'src/py2/f01c_exclusion_audit.py',
         a.root/'src/py2/f01c_tail_audit.py',
         a.root/'src/py2/f01c_structural_audit.py',
+        a.root/'src/py2/f01c_feasibility.py',
         a.root/'src/sh2/f-01c-train-standard-mixed-lora.sh')}
 
 
@@ -676,6 +679,68 @@ def run_audit_structural_truncation(a):
     print(json.dumps({'status':status,'report':str(path),'proposals':str(preview),
        'baseline_shortfall':need,'manual_review_candidates':report['manual_review_candidates'],
        'approved_for_training':False},ensure_ascii=False),flush=True)
+
+
+def run_audit_feasibility(a):
+    """Read-only exact-token Java sampling feasibility with v13 candidate provenance."""
+    import f01c_feasibility as f
+    m1,data,codes,source_hash,model,tok,sig=validated(a)
+    heldout,heldout_info=s.read_eval_fingerprints(a)
+    folder=f.discover_source(a.root/'results/f-01c'/a.model_mode,a.feasibility_source_run)
+    source_report=s.read_json(s.require_file(folder/'structural_truncation_audit.json'))
+    proposals=f.verify_proposals(folder,source_report,codes['java_mixed'],data['sha256'],
+        a.max_seq_length,tok,a,model['answer_ids'],source_hash,heldout)
+    java,train_java,val_java=f.select_java(a,codes['java_mixed'],source_hash,tok,
+        model['answer_ids'],proposals,heldout)
+    # Other-domain selection matches the frozen D-03 order and verifies the full budgets.
+    domain={}; other_ids={}
+    for corpus in ('java_source','python_mixed'):
+        train,train_stats=select_domain(a,corpus,'train',
+            a.max_train_examples if corpus=='java_source' else a.python_target_train,
+            codes[corpus],source_hash,tok,model['answer_ids'],set())
+        banned={idx for row in train for idx in (row['id1'],row['id2'])}
+        val,val_stats=select_domain(a,corpus,'validation',
+            a.source_val if corpus=='java_source' else a.python_target_val,
+            codes[corpus],source_hash,tok,model['answer_ids'],banned)
+        domain[corpus]={'train':train_stats,'validation':val_stats}
+        other_ids[corpus]={'train':train,'validation':val}
+    # Cross-domain Java fingerprints: actual sampled Source and Java Target must be disjoint.
+    source_train={s.code_hash(codes['java_source'][idx]) for row in other_ids['java_source']['train']
+                  for idx in (row['id1'],row['id2'])}
+    java_train={s.code_hash(row.get('a',codes['java_mixed'][row['id1']])) for row in train_java}
+    java_train.update(s.code_hash(row.get('b',codes['java_mixed'][row['id2']])) for row in train_java)
+    overlap_count=len(source_train & java_train)
+    domain['java_mixed']={'train':{'count':len(train_java),'labels':java['train_labels']},
+                           'validation':{'count':len(val_java),'labels':java['validation_labels']}}
+    full_train=sum(x['train']['count'] for x in domain.values())
+    full_val=sum(x['validation']['count'] for x in domain.values())
+    counts_ok=full_train == a.max_train_examples+a.java_target_train+a.python_target_train and full_val==a.max_val_examples
+    structurally_feasible=java['quota_feasible_under_review'] and counts_ok and overlap_count==0
+    status='F01C_V14_FEASIBLE_PENDING_LABEL_REVIEW' if structurally_feasible else 'F01C_V14_FEASIBILITY_BLOCKED'
+    result={'status':status,'version':VERSION,'audit_only':True,'approved_for_training':False,
+        'label_verified':False,'training_parameters_changed':False,'created_at_chicago':s.chicago_now(),
+        'structurally_feasible_pending_label_review':structurally_feasible,
+        'java':java,'domains':domain,'full_train_count':full_train,'full_validation_count':full_val,
+        'java_source_train_code_hash_overlap_count':overlap_count,
+        'structural_source_run':str(folder),'structural_source_report_sha256':s.sha256(folder/'structural_truncation_audit.json'),
+        'structural_source_proposals_sha256':s.sha256(folder/'structural_truncation_proposals.jsonl'),
+        'source_dataset_sha256':data['sha256'],'m1_adapter_sha256':m1['adapter_model_sha256'],
+        'heldout_corpus':heldout_info,'configuration':s.configuration(a),'implementation_sha256':implementation_sha(a),
+        'signature':sig,'limitations':['No training data is emitted or modified.',
+           'Parser success and label=0 annotations do not validate transformed clone labels.',
+           'Full automatic approval is prohibited pending independent label review.',
+           'Actual training preparation does not yet consume transformed samples.']}
+    a.run_dir.mkdir(parents=True,exist_ok=False)
+    path=a.run_dir/'deterministic_feasibility_audit.json'
+    s.exclusive_json(path,result)
+    plan=a.run_dir/'java_target_selection_review.json'
+    s.exclusive_json(plan,{'audit_only':True,'approved_for_training':False,
+        'train':f.review_rows(train_java),'validation':f.review_rows(val_java),
+        'selected_transformed_pairs':f.review_rows([r for r in train_java if r['origin']=='structural-v13'])})
+    print(json.dumps({'status':status,'report':str(path),'selection_review':str(plan),
+       'java_negative_quota':java['train_labels']['0'],'java_negative_target':a.java_target_train//2,
+       'transformed_selected':java['proposals_selected'],'full_train':full_train,
+       'full_validation':full_val,'approved_for_training':False}),flush=True)
 
 
 def run_audit_bcb_original(a):

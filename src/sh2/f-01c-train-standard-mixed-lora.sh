@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# F-01c v13: standalone multi-LLM M2 standard mixed LoRA entrypoint.
+# F-01c v14: standalone multi-LLM M2 standard mixed LoRA entrypoint.
 # All experiment-specific configuration lives in THIS shell script.
 # No calls to A-11/E-01b/D-03a shell wrappers.
 #
@@ -15,6 +15,7 @@
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-java-exclusions
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-tail-truncation
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-structural-truncation
+# bash src/sh2/f-01c-train-standard-mixed-lora.sh --audit-dataset-feasibility
 # Step 2 - Dataset Preparation / Integrity Validation
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --prepare
 # Step 3 - 3-GPU DDP Smoke Test
@@ -24,6 +25,11 @@
 # Step 5 - Verify completed run
 # bash src/sh2/f-01c-train-standard-mixed-lora.sh --verify results/f-01c/codellama-7b/<run>-train
 #
+
+# F01C_FEASIBILITY_SOURCE_RUN="$PWD/results/f-01c/codellama-7b/2026-1112-034414-structural-audit" \
+# bash src/sh2/f-01c-train-standard-mixed-lora.sh \
+#   --audit-dataset-feasibility
+
 # Change model: F01C_MODEL_MODE=starcoder2-7b bash src/sh2/f-01c-train-standard-mixed-lora.sh --preflight
 # For StarCoder2, set F01C_M1_ADAPTER and F01C_M1_ADAPTER_SHA256 explicitly.
 # Prerequisites: approved C-10 corpus, source data, M1 adapter, cached pinned base model, 3 BF16 GPUs.
@@ -166,6 +172,8 @@ BCB_MAX_ROWS_PER_FILE=1200000
 BCB_MAX_CODE_MAP_BYTES=500000000
 BCB_SHORTLIST_SIZE=256
 BCB_MAX_REPORT_CANDIDATES=256
+FEASIBILITY_POLICY='deterministic-training-feasibility-review-v1'
+FEASIBILITY_SOURCE_RUN="${F01C_FEASIBILITY_SOURCE_RUN:-newest-valid}"
 STRUCTURAL_TRUNCATION_POLICY='java-switch-case-group-and-nested-tail-two-sided-review-v2'
 STRUCTURAL_MAX_CASE_GROUPS=32
 TWO_SIDE_MAX_CANDIDATES_PER_SIDE=24
@@ -221,6 +229,7 @@ case "$MODE" in
   --audit-java-exclusions) PURPOSE="exclusion-audit" ;;
   --audit-tail-truncation) PURPOSE="tail-audit" ;;
   --audit-structural-truncation) PURPOSE="structural-audit" ;;
+  --audit-dataset-feasibility) PURPOSE="feasibility-audit" ;;
   --smoke) PURPOSE="smoke" ;;
   --train) PURPOSE="train" ;;
   --verify)
@@ -234,7 +243,7 @@ case "$MODE" in
       *) echo 'Run directory must end with -smoke or -train' >&2; exit 2 ;;
     esac
     ;;
-  *) echo 'Usage: --preflight|--audit-eligibility|--audit-comments|--audit-pool-truncation|--audit-syntax-truncation|--audit-bcb-original|--audit-java-exclusions|--audit-tail-truncation|--audit-structural-truncation|--prepare|--smoke|--train|--verify RUN_DIR' >&2; exit 2 ;;
+  *) echo 'Usage: --preflight|--audit-eligibility|--audit-comments|--audit-pool-truncation|--audit-syntax-truncation|--audit-bcb-original|--audit-java-exclusions|--audit-tail-truncation|--audit-structural-truncation|--audit-dataset-feasibility|--prepare|--smoke|--train|--verify RUN_DIR' >&2; exit 2 ;;
 esac
 [[ $# -eq 0 ]] || { echo 'Unexpected command arguments' >&2; exit 2; }
 if [[ "$PURPOSE" == "smoke" ]]; then
@@ -266,7 +275,7 @@ export OMP_NUM_THREADS="${F01C_OMP_NUM_THREADS:-4}"
 # -------- 5. Chicago timestamp, unique no-clobber logs/results --------
 LOG_DIR="$ROOT/logs/f-01c/$MODEL_MODE"
 RESULTS_DIR="$ROOT/results/f-01c/$MODEL_MODE"
-LOG_PREFIX="f-01c-v13"
+LOG_PREFIX="f-01c-v14"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 CHICAGO_TIMESTAMP="$(TZ=America/Chicago date "$LOG_TIMESTAMP_FORMAT")"
 mkdir -p "$LOG_DIR" "$RESULTS_DIR"
@@ -324,6 +333,8 @@ COMMON=(
   --bcb-shortlist-size "$BCB_SHORTLIST_SIZE"
   --bcb-max-report-candidates "$BCB_MAX_REPORT_CANDIDATES"
   --exclusion-max-examples "$EXCLUSION_MAX_EXAMPLES"
+  --feasibility-source-run "$FEASIBILITY_SOURCE_RUN"
+  --feasibility-policy "$FEASIBILITY_POLICY"
   --structural-truncation-policy "$STRUCTURAL_TRUNCATION_POLICY"
   --structural-max-case-groups "$STRUCTURAL_MAX_CASE_GROUPS"
   --two-side-max-candidates-per-side "$TWO_SIDE_MAX_CANDIDATES_PER_SIDE"
@@ -370,21 +381,24 @@ COMMON=(
 finish() {
   local rc=$?
   trap - EXIT
-  printf '[F-01c v13] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
+  printf '[F-01c v14] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
     "$rc" "$MODEL_MODE" "$MODE" "$(TZ=America/Chicago date -Is)" "$LOG_FILE" "$RUN_DIR" | tee -a "$LOG_FILE"
   exit "$rc"
 }
 trap finish EXIT
 {
-  printf '[F-01c v13] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
+  printf '[F-01c v14] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
     "$MODE" "$MODEL_MODE" "$MODEL_ID" "$MODEL_REVISION" "$(TZ=America/Chicago date -Is)"
-  printf '[F-01c v13] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
-  printf '[F-01c v13] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
+  printf '[F-01c v14] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
+  printf '[F-01c v14] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
     "$TRAIN_EXAMPLES" "$JAVA_TARGET_TRAIN" "$PYTHON_TARGET_TRAIN" "$VAL_EXAMPLES" "$MAX_STEPS" \
     "$(( PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * EXPECTED_WORLD_SIZE ))" "$TOKEN_POLICY"
   case "$MODE" in
     --preflight)
       "$PYTHON_BIN" -u "$PYFILE" preflight "${COMMON[@]}"
+      ;;
+    --audit-dataset-feasibility)
+      "$PYTHON_BIN" -u "$PYFILE" audit-dataset-feasibility "${COMMON[@]}"
       ;;
     --audit-structural-truncation)
       "$PYTHON_BIN" -u "$PYFILE" audit-structural-truncation "${COMMON[@]}"
