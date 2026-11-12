@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-01c v11 multi-LLM M2 standard mixed LoRA entrypoint.
+"""F-01c v13 multi-LLM M2 standard mixed LoRA entrypoint.
 
 All model-specific and experiment-specific settings are required CLI arguments
 passed explicitly from the standalone F-01c Shell launcher. No silent defaults.
@@ -76,6 +76,8 @@ def parser_factory():
     p.add_argument('--exclusion-max-examples', type=int, required=True)
     p.add_argument('--structural-truncation-policy', required=True)
     p.add_argument('--structural-max-case-groups', type=int, required=True)
+    p.add_argument('--two-side-max-candidates-per-side', type=int, required=True)
+    p.add_argument('--two-side-max-combinations', type=int, required=True)
     p.add_argument('--tail-truncation-policy', required=True)
     p.add_argument('--tail-max-blocks-per-code', type=int, required=True)
     p.add_argument('--tail-max-statements-per-block', type=int, required=True)
@@ -137,5 +139,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        print(f'[F-01c v11] ERROR {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
+        print(f'[F-01c v13] ERROR {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
         raise

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# F-01c v11: standalone multi-LLM M2 standard mixed LoRA entrypoint.
+# F-01c v13: standalone multi-LLM M2 standard mixed LoRA entrypoint.
 # All experiment-specific configuration lives in THIS shell script.
 # No calls to A-11/E-01b/D-03a shell wrappers.
 #
@@ -166,8 +166,10 @@ BCB_MAX_ROWS_PER_FILE=1200000
 BCB_MAX_CODE_MAP_BYTES=500000000
 BCB_SHORTLIST_SIZE=256
 BCB_MAX_REPORT_CANDIDATES=256
-STRUCTURAL_TRUNCATION_POLICY='java-switch-case-group-and-nested-tail-review-v1'
+STRUCTURAL_TRUNCATION_POLICY='java-switch-case-group-and-nested-tail-two-sided-review-v2'
 STRUCTURAL_MAX_CASE_GROUPS=32
+TWO_SIDE_MAX_CANDIDATES_PER_SIDE=24
+TWO_SIDE_MAX_COMBINATIONS=256
 TAIL_TRUNCATION_POLICY='java-last-block-consecutive-tail-expressions-review-v1'
 TAIL_MAX_BLOCKS_PER_CODE=96
 TAIL_MAX_STATEMENTS_PER_BLOCK=32
@@ -264,7 +266,7 @@ export OMP_NUM_THREADS="${F01C_OMP_NUM_THREADS:-4}"
 # -------- 5. Chicago timestamp, unique no-clobber logs/results --------
 LOG_DIR="$ROOT/logs/f-01c/$MODEL_MODE"
 RESULTS_DIR="$ROOT/results/f-01c/$MODEL_MODE"
-LOG_PREFIX="f-01c-v11"
+LOG_PREFIX="f-01c-v13"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 CHICAGO_TIMESTAMP="$(TZ=America/Chicago date "$LOG_TIMESTAMP_FORMAT")"
 mkdir -p "$LOG_DIR" "$RESULTS_DIR"
@@ -324,6 +326,8 @@ COMMON=(
   --exclusion-max-examples "$EXCLUSION_MAX_EXAMPLES"
   --structural-truncation-policy "$STRUCTURAL_TRUNCATION_POLICY"
   --structural-max-case-groups "$STRUCTURAL_MAX_CASE_GROUPS"
+  --two-side-max-candidates-per-side "$TWO_SIDE_MAX_CANDIDATES_PER_SIDE"
+  --two-side-max-combinations "$TWO_SIDE_MAX_COMBINATIONS"
   --tail-truncation-policy "$TAIL_TRUNCATION_POLICY"
   --tail-max-blocks-per-code "$TAIL_MAX_BLOCKS_PER_CODE"
   --tail-max-statements-per-block "$TAIL_MAX_STATEMENTS_PER_BLOCK"
@@ -366,16 +370,16 @@ COMMON=(
 finish() {
   local rc=$?
   trap - EXIT
-  printf '[F-01c v11] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
+  printf '[F-01c v13] EXIT=%s MODEL_MODE=%s MODE=%s CHICAGO=%s LOG=%s RUN=%s\n' \
     "$rc" "$MODEL_MODE" "$MODE" "$(TZ=America/Chicago date -Is)" "$LOG_FILE" "$RUN_DIR" | tee -a "$LOG_FILE"
   exit "$rc"
 }
 trap finish EXIT
 {
-  printf '[F-01c v11] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
+  printf '[F-01c v13] MODE=%s MODEL_MODE=%s MODEL_ID=%s REVISION=%s CHICAGO=%s\n' \
     "$MODE" "$MODEL_MODE" "$MODEL_ID" "$MODEL_REVISION" "$(TZ=America/Chicago date -Is)"
-  printf '[F-01c v11] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
-  printf '[F-01c v11] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
+  printf '[F-01c v13] GPUs=%s HF_HOME=%s RUN=%s LOG=%s\n' "$GPU_IDS" "$HF_HOME" "$RUN_DIR" "$LOG_FILE"
+  printf '[F-01c v13] SOURCE=%s JAVA_TARGET=%s PYTHON_TARGET=%s VAL=%s STEPS=%s BATCH_GLOBAL=%s TOKEN_POLICY=%s\n' \
     "$TRAIN_EXAMPLES" "$JAVA_TARGET_TRAIN" "$PYTHON_TARGET_TRAIN" "$VAL_EXAMPLES" "$MAX_STEPS" \
     "$(( PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * EXPECTED_WORLD_SIZE ))" "$TOKEN_POLICY"
   case "$MODE" in

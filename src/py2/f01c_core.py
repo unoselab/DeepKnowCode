@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-01c v11 M2 mixed-source LoRA: independent multi-LLM core.
+"""F-01c v13 M2 mixed-source LoRA: independent multi-LLM core.
 
 Model choices, all experiment parameters, paths, budgets, seeding, scoring IDs
 and training settings are exclusively Shell -> required CLI. No silent defaults.
@@ -17,7 +17,7 @@ import f01c_shared as s
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids, contextual_continuation
 from f01c_comments import POLICY as COMMENT_POLICY, UnsafeJavaLexing, strip_java_comments
 
-VERSION = 'v11'
+VERSION = 'v13'
 CORPORA = ('java_source', 'java_mixed', 'python_mixed')
 
 
@@ -108,8 +108,10 @@ def arg_validate(a):
             or not 1 <= a.tail_max_blocks_per_code <= 128
             or not 1 <= a.tail_max_statements_per_block <= 128):
         raise ValueError('Invalid shell-defined tail truncation policy or bounds')
-    if (a.structural_truncation_policy != 'java-switch-case-group-and-nested-tail-review-v1'
-            or not 1 <= a.structural_max_case_groups <= 128):
+    if (a.structural_truncation_policy != 'java-switch-case-group-and-nested-tail-two-sided-review-v2'
+            or not 1 <= a.structural_max_case_groups <= 128
+            or not 1 <= a.two_side_max_candidates_per_side <= 128
+            or not 1 <= a.two_side_max_combinations <= 16384):
         raise ValueError('Invalid shell-defined structural truncation policy or bounds')
     if a.exclusion_max_examples < 0 or a.exclusion_max_examples > 100:
         raise ValueError('Invalid shell-defined exclusion example cap')
@@ -643,7 +645,7 @@ def run_audit_structural_truncation(a):
     result=structural.audit_pairs(a,pool[0],codes['java_mixed'],tok,model['answer_ids'],
                                   contextual_continuation,source_hash,heldout)
     need=max(0,a.java_target_train//2-result['baseline_eligible'])
-    status='F01C_V11_STRUCTURAL_TRUNCATION_MANUAL_REVIEW_REQUIRED'
+    status='F01C_V13_STRUCTURAL_TRUNCATION_MANUAL_REVIEW_REQUIRED'
     report={'status':status,'version':VERSION,'created_at_chicago':s.chicago_now(),
             'audit_only':True,'approved_for_training':False,
             'training_parameters_changed':False,'baseline_shortfall':need,
@@ -661,6 +663,7 @@ def run_audit_structural_truncation(a):
             'limitations':['Removing case branches or tail expressions changes potential execution paths.',
                 'Parseable Java does not establish compilation, semantic equivalence, or preserved negative labels.',
                 'Standalone return -1 and default branches are protected from deletion.',
+                'Two-sided search is bounded; absence of a proposal is not proof of infeasibility.',
                 'No training input or original data is changed and no proposal is automatically approved.',
                 'Human review and reproducible train/validation isolation remain mandatory.']}
     a.run_dir.mkdir(parents=True,exist_ok=False)
