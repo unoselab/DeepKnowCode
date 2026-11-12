@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-01c v6 multi-LLM M2 standard mixed LoRA entrypoint.
+"""F-01c v9 multi-LLM M2 standard mixed LoRA entrypoint.
 
 All model-specific and experiment-specific settings are required CLI arguments
 passed explicitly from the standalone F-01c Shell launcher. No silent defaults.
@@ -21,7 +21,7 @@ def strict_boolean(raw):
 
 def parser_factory():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('command', choices=('preflight', 'prepare', 'worker', 'finalize', 'verify', 'audit-eligibility', 'audit-comments', 'audit-pool-truncation', 'audit-syntax-truncation', 'audit-bcb-original'))
+    p.add_argument('command', choices=('preflight', 'prepare', 'worker', 'finalize', 'verify', 'audit-eligibility', 'audit-comments', 'audit-pool-truncation', 'audit-syntax-truncation', 'audit-bcb-original', 'audit-java-exclusions', 'audit-tail-truncation', 'audit-structural-truncation'))
     for name in (
         'm1-source-identity-policy', 'model-mode', 'model-id', 'model-revision', 'model-family', 'expected-model-type',
         'token-policy', 'expected-yes-token', 'expected-no-token', 'target-modules',
@@ -73,6 +73,12 @@ def parser_factory():
     p.add_argument('--bcb-discovery-patterns', nargs='+', required=True)
     for name in ('bcb-max-files','bcb-max-rows-per-file','bcb-max-code-map-bytes','bcb-shortlist-size','bcb-max-report-candidates'):
         p.add_argument('--'+name, type=int, required=True)
+    p.add_argument('--exclusion-max-examples', type=int, required=True)
+    p.add_argument('--structural-truncation-policy', required=True)
+    p.add_argument('--structural-max-case-groups', type=int, required=True)
+    p.add_argument('--tail-truncation-policy', required=True)
+    p.add_argument('--tail-max-blocks-per-code', type=int, required=True)
+    p.add_argument('--tail-max-statements-per-block', type=int, required=True)
     return p
 
 
@@ -97,7 +103,13 @@ def main():
     args.adapter_dir = args.adapter_dir.expanduser().resolve()
     args.checkpoint_dir = args.checkpoint_dir.expanduser().resolve()
     core.validate_args(args)
-    if args.command == 'audit-bcb-original':
+    if args.command == 'audit-structural-truncation':
+        core.run_audit_structural_truncation(args)
+    elif args.command == 'audit-tail-truncation':
+        core.run_audit_tail_truncation(args)
+    elif args.command == 'audit-java-exclusions':
+        core.run_audit_java_exclusions(args)
+    elif args.command == 'audit-bcb-original':
         core.run_audit_bcb_original(args)
     elif args.command == 'audit-syntax-truncation':
         core.run_audit_syntax_truncation(args)
@@ -125,5 +137,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        print(f'[F-01c v6] ERROR {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
+        print(f'[F-01c v9] ERROR {type(exc).__name__}: {exc}', file=sys.stderr, flush=True)
         raise

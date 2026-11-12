@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""F-01c v6 M2 mixed-source LoRA: independent multi-LLM core.
+"""F-01c v10 M2 mixed-source LoRA: independent multi-LLM core.
 
 Model choices, all experiment parameters, paths, budgets, seeding, scoring IDs
 and training settings are exclusively Shell -> required CLI. No silent defaults.
@@ -17,7 +17,7 @@ import f01c_shared as s
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids, contextual_continuation
 from f01c_comments import POLICY as COMMENT_POLICY, UnsafeJavaLexing, strip_java_comments
 
-VERSION = 'v6'
+VERSION = 'v10'
 CORPORA = ('java_source', 'java_mixed', 'python_mixed')
 
 
@@ -65,7 +65,7 @@ def arg_validate(a):
         raise ValueError('Held-out overlap check cannot be disabled in M2')
     if a.max_overlap_examples<1 or a.max_train_examples<2 or a.max_val_examples<2:
         raise ValueError('Invalid count or overlap settings')
-    if a.purpose not in ('preflight','prepare','smoke','train','audit','comment-audit','recovery-audit','syntax-audit','bcb-audit'):
+    if a.purpose not in ('preflight','prepare','smoke','train','audit','comment-audit','recovery-audit','syntax-audit','bcb-audit','exclusion-audit','tail-audit'):
         raise ValueError('Invalid execution purpose')
     if a.adapter_dir!=a.run_dir/'adapter' or a.prepared_dir!=a.run_dir/'prepared' or a.checkpoint_dir!=a.run_dir/'checkpoints':
         raise ValueError('Artifact paths must be under this run directory')
@@ -104,6 +104,15 @@ def arg_validate(a):
             or a.bcb_shortlist_size<1 or a.bcb_shortlist_size>10000
             or a.bcb_max_report_candidates<1 or a.bcb_max_report_candidates>10000):
         raise ValueError('Invalid shell-defined BCB audit bounds')
+    if (a.tail_truncation_policy != 'java-last-block-consecutive-tail-expressions-review-v1'
+            or not 1 <= a.tail_max_blocks_per_code <= 128
+            or not 1 <= a.tail_max_statements_per_block <= 128):
+        raise ValueError('Invalid shell-defined tail truncation policy or bounds')
+    if (a.structural_truncation_policy != 'java-switch-case-group-and-nested-tail-review-v1'
+            or not 1 <= a.structural_max_case_groups <= 128):
+        raise ValueError('Invalid shell-defined structural truncation policy or bounds')
+    if a.exclusion_max_examples < 0 or a.exclusion_max_examples > 100:
+        raise ValueError('Invalid shell-defined exclusion example cap')
     if a.greater_is_better or a.use_cache or a.save_total_limit!=0:
         raise ValueError('Unapproved checkpoint/persistence strategy')
 
@@ -118,6 +127,9 @@ def implementation_sha(a):
         a.root/'src/py2/f01c_recovery.py',
         a.root/'src/py2/f01c_syntax_audit.py',
         a.root/'src/py2/f01c_bcb_audit.py',
+        a.root/'src/py2/f01c_exclusion_audit.py',
+        a.root/'src/py2/f01c_tail_audit.py',
+        a.root/'src/py2/f01c_structural_audit.py',
         a.root/'src/sh2/f-01c-train-standard-mixed-lora.sh')}
 
 
@@ -220,7 +232,7 @@ def validate_args(a):arg_validate(a)
 def run_preflight(a):
     m1,data,_,_,model,_,sig=validated(a)
     a.run_dir.mkdir(parents=True,exist_ok=False)
-    report={'status':'F01C_V6_PREFLIGHT_PASS_NOT_TRAINED','version':VERSION,'created_at_chicago':s.chicago_now(),
+    report={'status':'F01C_V10_PREFLIGHT_PASS_NOT_TRAINED','version':VERSION,'created_at_chicago':s.chicago_now(),
             'configuration':s.configuration(a),'m1':m1,'dataset':data,'model':model,
             'signature':sig,'implementation_sha256':implementation_sha(a),
             'limitations':['No GPU training in preflight','Training eligibility and held-out overlap require full preparation']}
@@ -359,7 +371,7 @@ def audit_target_eligibility(a, codes, source_hash, tokenizer, answer_ids):
                     failures.append({'corpus':corpus,'split':split,'label':label,
                                      'deficit':labels[str(label)]['deficit_at_training_limit']})
             report[split][corpus] = {'requested_pairs':budget[split][corpus], 'labels':labels}
-    return {'status':'F01C_V6_ELIGIBILITY_AUDIT_PASS' if not failures else 'F01C_V6_ELIGIBILITY_AUDIT_INSUFFICIENT',
+    return {'status':'F01C_V10_ELIGIBILITY_AUDIT_PASS' if not failures else 'F01C_V10_ELIGIBILITY_AUDIT_INSUFFICIENT',
             'training_max_seq_length':a.max_seq_length,'audit_token_limits':limits,
             'training_parameters_changed':False,'candidate_deficits':failures,
             'limitations':['Counts reflect target_pool source fingerprint exclusion and exact prompt tokenization.',
@@ -455,8 +467,8 @@ def comment_audit_candidates(a, codes, source_hash, tokenizer, answer_ids, heldo
             if any(row['processed_fingerprint_collision_ids'].values()):
                 row['status'] = 'DUPLICATE_REVIEW_REQUIRED'
     recoverable = sum(r['status']=='ELIGIBLE_FOR_REVIEW' for r in records)
-    return {'status': ('F01C_V6_COMMENT_AUDIT_POTENTIAL_RECOVERY' if recoverable >= need
-                        else 'F01C_V6_COMMENT_AUDIT_INSUFFICIENT'),
+    return {'status': ('F01C_V10_COMMENT_AUDIT_POTENTIAL_RECOVERY' if recoverable >= need
+                        else 'F01C_V10_COMMENT_AUDIT_INSUFFICIENT'),
             'audit_only':True,'training_parameters_changed':False,
             'comment_removal_policy':COMMENT_POLICY,
             'java_target_negative_required':required,
@@ -514,8 +526,8 @@ def run_audit_recovery(a):
     candidate_total=discovery['extra_eligible_count']
     truncation=(recovery.truncation_risks(a,pool,codes['java_mixed'],tok,model['answer_ids'],
                                         contextual_continuation) if candidate_total<missing else None)
-    status=('F01C_V6_POOL_CANDIDATES_FOUND_REVIEW_REQUIRED' if candidate_total>=missing
-            else 'F01C_V6_POOL_INSUFFICIENT_TRUNCATION_REVIEW_REQUIRED')
+    status=('F01C_V10_POOL_CANDIDATES_FOUND_REVIEW_REQUIRED' if candidate_total>=missing
+            else 'F01C_V10_POOL_INSUFFICIENT_TRUNCATION_REVIEW_REQUIRED')
     report={'status':status,'version':VERSION,'created_at_chicago':s.chicago_now(),
             'audit_only':True,'approved_for_training':False,'training_parameters_changed':False,
             'baseline_eligible':eligible,'negative_required':a.java_target_train//2,
@@ -546,7 +558,7 @@ def run_audit_syntax_truncation(a):
                                contextual_continuation, source_hash,heldout)
     baseline=records['baseline_eligible']
     needed=max(0,a.java_target_train//2-baseline)
-    report={'status':'F01C_V6_SYNTAX_TRUNCATION_REVIEW_REQUIRED',
+    report={'status':'F01C_V10_SYNTAX_TRUNCATION_REVIEW_REQUIRED',
             'version':VERSION,'created_at_chicago':s.chicago_now(),
             'audit_only':True,'approved_for_training':False,
             'training_parameters_changed':False,
@@ -581,6 +593,88 @@ def run_audit_syntax_truncation(a):
       'approved_for_training':False},ensure_ascii=False),flush=True)
 
 
+def run_audit_tail_truncation(a):
+    """Read-only last-block consecutive suffix truncation; unapproved proposals only."""
+    import f01c_tail_audit as tail
+    m1,data,codes,source_hash,model,tok,sig=validated(a)
+    heldout,heldout_info=s.read_eval_fingerprints(a)
+    pool=target_pool(a.java_target_dir/'train.txt',codes['java_mixed'],source_hash)
+    result=tail.audit_pairs(a,pool[0],codes['java_mixed'],tok,model['answer_ids'],
+                            contextual_continuation,source_hash,heldout)
+    need=max(0,a.java_target_train//2-result['baseline_eligible'])
+    status='F01C_V10_TAIL_TRUNCATION_MANUAL_REVIEW_REQUIRED'
+    report={'status':status,'version':VERSION,'created_at_chicago':s.chicago_now(),
+            'audit_only':True,'approved_for_training':False,
+            'training_parameters_changed':False,'baseline_shortfall':need,
+            'baseline_eligible':result['baseline_eligible'],
+            'manual_review_candidates':result['manual_review_candidates'],
+            'overlength_count':result['overlength_count'],
+            'candidate_records':result['candidate_records'],
+            'parser_backend':result['parser_backend'],
+            'parser_versions':result['parser_versions'],
+            'policy':a.tail_truncation_policy,'configuration':s.configuration(a),
+            'source_dataset_sha256':data['sha256'],
+            'heldout_corpus':heldout_info,
+            'm1_adapter_sha256':m1['adapter_model_sha256'],
+            'implementation_sha256':implementation_sha(a),'signature':sig,
+            'limitations':['Parseable Java alone does not establish compilability or semantic equivalence.',
+              'Removing tail expressions can change behavior and original negative label.',
+              'Exception cleanup, return, throw, catch and finally are not truncation targets.',
+              'No modified code is used in training and no automatic approval is possible.',
+              'Manual code review, endpoint leakage and frozen M2/M3 validation are necessary.']}
+    a.run_dir.mkdir(parents=True,exist_ok=False)
+    path=a.run_dir/'tail_truncation_audit.json'
+    s.exclusive_json(path,report)
+    preview=a.run_dir/'tail_truncation_proposals.jsonl'
+    with preview.open('x',encoding='utf-8') as out:
+        for row in result['previews']:
+            out.write(json.dumps(row,ensure_ascii=False,sort_keys=True)+'\n')
+    print(json.dumps({'status':status,'report':str(path),'proposals':str(preview),
+       'baseline_shortfall':need,'manual_review_candidates':report['manual_review_candidates'],
+       'approved_for_training':False},ensure_ascii=False),flush=True)
+
+
+def run_audit_structural_truncation(a):
+    """Read-only switch-case-group and nested tail-statement candidates."""
+    import f01c_structural_audit as structural
+    m1,data,codes,source_hash,model,tok,sig=validated(a)
+    heldout,heldout_info=s.read_eval_fingerprints(a)
+    pool=target_pool(a.java_target_dir/'train.txt',codes['java_mixed'],source_hash)
+    result=structural.audit_pairs(a,pool[0],codes['java_mixed'],tok,model['answer_ids'],
+                                  contextual_continuation,source_hash,heldout)
+    need=max(0,a.java_target_train//2-result['baseline_eligible'])
+    status='F01C_V10_STRUCTURAL_TRUNCATION_MANUAL_REVIEW_REQUIRED'
+    report={'status':status,'version':VERSION,'created_at_chicago':s.chicago_now(),
+            'audit_only':True,'approved_for_training':False,
+            'training_parameters_changed':False,'baseline_shortfall':need,
+            'baseline_eligible':result['baseline_eligible'],
+            'manual_review_candidates':result['manual_review_candidates'],
+            'overlength_count':result['overlength_count'],
+            'candidate_records':result['candidate_records'],
+            'parser_backend':result['parser_backend'],
+            'parser_versions':result['parser_versions'],
+            'policy':a.structural_truncation_policy,'configuration':s.configuration(a),
+            'source_dataset_sha256':data['sha256'],
+            'heldout_corpus':heldout_info,
+            'm1_adapter_sha256':m1['adapter_model_sha256'],
+            'implementation_sha256':implementation_sha(a),'signature':sig,
+            'limitations':['Removing case branches or tail expressions changes potential execution paths.',
+                'Parseable Java does not establish compilation, semantic equivalence, or preserved negative labels.',
+                'Standalone return -1 and default branches are protected from deletion.',
+                'No training input or original data is changed and no proposal is automatically approved.',
+                'Human review and reproducible train/validation isolation remain mandatory.']}
+    a.run_dir.mkdir(parents=True,exist_ok=False)
+    path=a.run_dir/'structural_truncation_audit.json'
+    s.exclusive_json(path,report)
+    preview=a.run_dir/'structural_truncation_proposals.jsonl'
+    with preview.open('x',encoding='utf-8') as out:
+        for row in result['previews']:
+            out.write(json.dumps(row,ensure_ascii=False,sort_keys=True)+'\n')
+    print(json.dumps({'status':status,'report':str(path),'proposals':str(preview),
+       'baseline_shortfall':need,'manual_review_candidates':report['manual_review_candidates'],
+       'approved_for_training':False},ensure_ascii=False),flush=True)
+
+
 def run_audit_bcb_original(a):
     """BCB original candidate discovery; reporting only, no training approval."""
     import f01c_bcb_audit as bcb
@@ -597,8 +691,8 @@ def run_audit_bcb_original(a):
     missing=max(0,a.java_target_train//2-baseline)
     discovery=bcb.run(a,codes,source_hash,heldout,tok,model['answer_ids'])
     count=discovery['preliminary_eligible_count']
-    status=('F01C_V6_BCB_PRELIMINARY_CANDIDATES_REVIEW_REQUIRED' if count else
-            'F01C_V6_BCB_NO_CANDIDATES_FOUND_IN_SCANNED_SOURCES')
+    status=('F01C_V10_BCB_PRELIMINARY_CANDIDATES_REVIEW_REQUIRED' if count else
+            'F01C_V10_BCB_NO_CANDIDATES_FOUND_IN_SCANNED_SOURCES')
     report={'status':status,'version':VERSION,'created_at_chicago':s.chicago_now(),
         'audit_only':True,'approved_for_training':False,'training_parameters_changed':False,
         'baseline_eligible':baseline,'negative_required':a.java_target_train//2,
@@ -615,6 +709,39 @@ def run_audit_bcb_original(a):
     print(json.dumps({'status':status,'report':str(path),'baseline_shortfall':missing,
       'files_discovered':discovery['files_discovered'],
       'preliminary_eligible_count':count,'approved_for_training':False},ensure_ascii=False),flush=True)
+
+
+def run_audit_java_exclusions(a):
+    """Exhaustive, read-only Java target source/exclusion/overlength census."""
+    import f01c_exclusion_audit as exclusion
+    m1,data,codes,source_hash,model,tok,sig=validated(a)
+    heldout,heldout_info=s.read_eval_fingerprints(a)
+    census=exclusion.audit_pairs(a,codes,source_hash,heldout,tok,model['answer_ids'])
+    # Cross-check against EXACT existing target_pool eligibility, no relaxed policy.
+    pool=target_pool(a.java_target_dir/'train.txt',codes['java_mixed'],source_hash)
+    for label in (0,1):
+        actual=len(pool[label]);observed=census['training'][str(label)]['counts']['retained_by_actual_source_policy']
+        if actual!=observed:raise RuntimeError(f'Target pool parity mismatch label={label}: {actual}!={observed}')
+    report={'status':'F01C_V10_JAVA_EXCLUSION_AUDIT_REVIEW_REQUIRED',
+        'version':VERSION,'created_at_chicago':s.chicago_now(),
+        'audit_only':True,'approved_for_training':False,'training_parameters_changed':False,
+        'census':census,'configuration':s.configuration(a),
+        'source_dataset_sha256':data['sha256'],'heldout_corpus':heldout_info,
+        'm1_adapter_sha256':m1['adapter_model_sha256'],
+        'implementation_sha256':implementation_sha(a),'signature':sig,
+        'limitations':['No filters, candidates, labels or train/validation samples are changed.',
+          'Exclusion reasons overlap: do not add orthogonal counts together.',
+          'A source-excluded pair cannot be treated as safe by changing the policy.',
+          'Training remains blocked until prepared data integrity and sample quotas are separately satisfied.']}
+    a.run_dir.mkdir(parents=True,exist_ok=False)
+    path=a.run_dir/'java_negative_exclusion_audit.json'
+    s.exclusive_json(path,report)
+    print(json.dumps({'status':report['status'],'report':str(path),
+      'java_negative_total':census['training']['0']['counts']['total_rows'],
+      'source_retained':census['training']['0']['counts']['retained_by_actual_source_policy'],
+      'eligible':census['baseline_java_negative_eligible'],
+      'baseline_shortfall':census['baseline_shortfall'],
+      'approved_for_training':False},ensure_ascii=False),flush=True)
 
 
 def check_heldout(a,selected,codes):
@@ -636,7 +763,7 @@ def require_smoke(a,sig):
     for file in reversed(sorted(home.glob('*-smoke/smoke_success.json'))):
         try:
             obj=s.read_json(file)
-            if obj.get('status')=='F01C_V6_SMOKE_PASS' and obj.get('compatibility_signature')==sig and obj.get('initial_adapter_sha256')==a.initial_adapter_sha256:
+            if obj.get('status')=='F01C_V10_SMOKE_PASS' and obj.get('compatibility_signature')==sig and obj.get('initial_adapter_sha256')==a.initial_adapter_sha256:
                 # Revalidate recorded adapter integrity, not merely presence of a JSON proof.
                 ad=Path(obj['adapter'])
                 hashes=obj.get('adapter_sha256',{})
@@ -688,7 +815,7 @@ def run_prepare(a):
                        'M3 MUST use byte-identical prepared files to compare order only',
                        'Model tokenization may prevent exact Pair ID matching across different LLMs; hashes are recorded']}
     s.exclusive_json(a.prepared_dir/'manifest.json',manifest)
-    print(json.dumps({'status':'F01C_V6_PREPARED_NOT_TRAINED','run':str(a.run_dir),'train':len(selected['train']),
+    print(json.dumps({'status':'F01C_V10_PREPARED_NOT_TRAINED','run':str(a.run_dir),'train':len(selected['train']),
                       'validation':len(selected['validation']),'train_pair_ids_sha256':stats['train']['pair_ids_sha256'],
                       'manifest_sha256':s.sha256(a.prepared_dir/'manifest.json')}),flush=True)
 
@@ -816,7 +943,7 @@ def run_finalize(a):
         if s.sha256(s.require_file(a.adapter_dir/name))!=digest:raise RuntimeError('Adapter weight/checksum mismatch '+name)
     if summ['initial_m1_sha256']!=m['initial_m1']['adapter_model_sha256']:
         raise RuntimeError('M1 adapter SHA changed')
-    status='F01C_V6_SMOKE_PASS' if a.purpose=='smoke' else 'F01C_V6_M2_TRAINING_COMPLETE'
+    status='F01C_V10_SMOKE_PASS' if a.purpose=='smoke' else 'F01C_V10_M2_TRAINING_COMPLETE'
     rec={'version':VERSION,'status':status,'created_at_chicago':s.chicago_now(),
          'model_id':a.model_id,'model_revision':a.model_revision,'model_mode':a.model_mode,
          'initial_adapter_sha256':m['initial_m1']['adapter_model_sha256'],
@@ -842,4 +969,4 @@ def run_verify(a):
         raise RuntimeError('Training summary hash mismatch')
     for name,digest in r['adapter_sha256'].items():
         if s.sha256(s.require_file(a.adapter_dir/name))!=digest:raise RuntimeError('Adapter hash mismatch '+name)
-    print(json.dumps({'status':'F01C_V6_VERIFY_PASS','run':str(a.run_dir),'adapter':str(a.adapter_dir)}),flush=True)
+    print(json.dumps({'status':'F01C_V10_VERIFY_PASS','run':str(a.run_dir),'adapter':str(a.adapter_dir)}),flush=True)
