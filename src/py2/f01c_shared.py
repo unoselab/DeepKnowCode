@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from f01c_variants import TokenPolicy, checked_training_tokens, resolve_answer_ids
-VERSION = 'v5'
+VERSION = 'v6'
 
 def chicago_now():
     return datetime.now(ZoneInfo('America/Chicago')).isoformat()
@@ -157,7 +157,11 @@ def cached_model(args):
 
 def configuration(args):
     """Record every effective Shell -> Python argument; no omitted controls."""
-    effective = {key: (str(value) if isinstance(value, Path) else value)
+    def json_arg(value):
+        if isinstance(value, Path): return str(value)
+        if isinstance(value, (list,tuple)): return [json_arg(x) for x in value]
+        return value
+    effective = {key: json_arg(value)
                  for key, value in vars(args).items() if key != 'command'}
     effective['version'] = VERSION
     effective['global_batch'] = (
