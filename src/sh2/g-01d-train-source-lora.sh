@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# G-01d v1: one-command GPT-OSS-120B M1 training orchestrator.
-# Invokes pinned, verified G-01c Python ENGINE directly; NEVER calls another shell wrapper.
+# G-01d v4: one-command GPT-OSS-120B M1 training orchestrator.
+# Invokes pinned, verified G-01d v4 Python Engine directly; NEVER calls another shell wrapper.
 # All experiment configuration is defined in THIS shell and explicitly forwarded to Python.
 set -Eeuo pipefail
 export TZ=America/Chicago
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN="python"
-PYFILE="$ROOT/src/py2/g-01c-train-source-lora.py"
+PYFILE="$ROOT/src/py2/g-01d-train-source-lora.py"
 AUDITOR="$ROOT/src/py2/g-01d-pipeline-audit.py"
-VERSION="v1"
-ENGINE_VERSION="v1"
+VERSION="v4"
+ENGINE_VERSION="v4"
 CONDA_ENV="deepknowcode-gptoss"
-EXPECTED_ENGINE_SHA256="40c9ca81266e7029ce0683ca6af130642a8849565d4c26f55a594c1c658e19dc"
+EXPECTED_ENGINE_SHA256="5e63eb94510b4aab42b93a889aef4164bddd1019655bdb6bcc10f35e31610228"
 # Reuse the exact uploaded G-01c v1 prepare proof; never regenerate/select source pairs.
 PREPARED_RUN="$ROOT/results/g-01c/gpt-oss-120b/2026-1112-235431-1794549271-271004-23954-prepare"
 EXPECTED_PREPARED_MANIFEST_SHA256="d61894e8c55a3aa31f9bdeff7d2003fee50ff993e85a2cac9d005cb3f5049449"
@@ -31,6 +31,8 @@ MIN_COMPUTE_MAJOR=8
 MAX_GPU_GIB=39
 MAX_CPU_GIB=4
 MIN_HEADROOM_GIB=4
+# Start reclaiming inactive CUDA cache before the v3 failure at ~31.88 GiB reserved.
+CACHE_RECLAIM_TRIGGER_GIB=30
 EXPECTED_SHARDS=15
 MIN_SHARD_BYTES=1000000000
 ATTENTION_BACKEND="eager"
@@ -60,6 +62,9 @@ AUDIT_PROGRESS_EVERY=1000
 SEED=2026
 ANSWER_YES=" YES"
 ANSWER_NO=" NO"
+# G-01c prepared at 2026-11-12 23:56 Chicago; GPT-OSS Harmony has a
+# dynamic `Current date:` via strftime_now(). Freeze the original date.
+TEMPLATE_DATE="2026-11-12"
 SYSTEM_TEXT="You are a code clone classifier. Return exactly YES or NO in the final answer."
 USER_PREFIX=$'Determine whether the following two code fragments are code clones. Answer YES if they are clones and NO otherwise.\nLanguage: java\nCode A:\n'
 USER_SEPARATOR=$'\nCode B:\n'
@@ -97,11 +102,11 @@ SAVE_OPTIMIZER_STATE="true"
 # Runtime and automatic Chicago timestamp logs.
 LOG_DIR="$ROOT/logs/g-01d/gpt-oss-120b"
 RESULTS_DIR="$ROOT/results/g-01d/gpt-oss-120b"
-LOG_PREFIX="g-01d-v1"
+LOG_PREFIX="g-01d-v4"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 LOG_TEE_OPTIONS='-a'
 [[ "$#" -eq 1 && "$1" == '--train' ]] || { echo 'Usage: bash src/sh2/g-01d-train-source-lora.sh --train' >&2; exit 2; }
-[[ -f "$PYFILE" && -f "$AUDITOR" ]] || { echo 'G-01d auditor or G-01c Python engine missing' >&2; exit 2; }
+[[ -f "$PYFILE" && -f "$AUDITOR" ]] || { echo 'G-01d v4 auditor or Python engine missing' >&2; exit 2; }
 [[ "${CONDA_DEFAULT_ENV:-}" == "$CONDA_ENV" ]] || { echo "ERROR: conda activate $CONDA_ENV" >&2; exit 2; }
 export CUDA_VISIBLE_DEVICES="$DEVICE_IDS"
 export TOKENIZERS_PARALLELISM='false'
@@ -146,7 +151,7 @@ step_pass() {
 }
 printf '[G-01d %s] START MODE=--train MODEL=%s REVISION=%s CHICAGO=%s PIPELINE=%s LOG=%s\n' \
   "$VERSION" "$MODEL_ID" "$MODEL_REVISION" "$(at_chicago)" "$PIPELINE" "$LOG_FILE"
-printf '[G-01d %s] ENGINE=G-01c v1 Python (direct execution, no shell-wrapper chaining)\n' "$VERSION"
+printf '[G-01d %s] ENGINE=G-01d v4 Python (direct execution, no shell-wrapper chaining) TEMPLATE_DATE=%s\n' "$VERSION" "$TEMPLATE_DATE"
 
 # Shared training-engine parameters; set mode/run/proof paths for each step below.
 RUN_DIR=''
@@ -162,6 +167,7 @@ build_args() {
   --quant-method "$QUANT_METHOD" --snapshot "$SNAPSHOT"
   --device-ids "$DEVICE_IDS" --expected-gpus "$EXPECTED_GPUS" --min-compute-major "$MIN_COMPUTE_MAJOR"
   --max-gpu-gib "$MAX_GPU_GIB" --max-cpu-gib "$MAX_CPU_GIB" --min-headroom-gib "$MIN_HEADROOM_GIB"
+  --cache-reclaim-trigger-gib "$CACHE_RECLAIM_TRIGGER_GIB"
   --expected-shards "$EXPECTED_SHARDS" --min-shard-bytes "$MIN_SHARD_BYTES"
   --attention-backend "$ATTENTION_BACKEND" --device-map "$DEVICE_MAP" --precision "$PRECISION"
   --allow-network "$ALLOW_NETWORK" --expected-torch "$EXPECTED_TORCH"
@@ -176,7 +182,7 @@ build_args() {
   --max-seq-length "$MAX_SEQ_LENGTH" --audit-progress-every "$AUDIT_PROGRESS_EVERY"
   --seed "$SEED" --answer-yes "$ANSWER_YES" --answer-no "$ANSWER_NO"
   --system-text "$SYSTEM_TEXT" --user-prefix "$USER_PREFIX" --user-separator "$USER_SEPARATOR"
-  --user-suffix "$USER_SUFFIX" --target-modules "$TARGET_MODULES"
+  --user-suffix "$USER_SUFFIX" --template-date "$TEMPLATE_DATE" --target-modules "$TARGET_MODULES"
   --min-target-modules "$MIN_TARGET_MODULES" --expected-trainable-parameters "$EXPECTED_TRAINABLE_PARAMETERS" --lora-rank "$LORA_RANK" --lora-alpha "$LORA_ALPHA"
   --lora-dropout "$LORA_DROPOUT" --lora-bias "$LORA_BIAS"
   --gradient-checkpointing "$GRADIENT_CHECKPOINTING"
@@ -211,7 +217,7 @@ step_begin 'PREPARED_PROOF_AND_ENGINE'
   --frozen-manifest-sha256 "$FROZEN_MANIFEST_SHA256"
 step_pass
 
-# Helper to update mode-specific dynamic CLI args, run G-01c Python directly,
+# Helper to update mode-specific dynamic CLI args, run G-01d Python directly,
 # then verify evidence. Each run directory is exclusive and never overwritten.
 run_stage() {
   local mode="$1" ordinal="$2" expected_status="$3" steps_expected="$4"
@@ -226,17 +232,20 @@ run_stage() {
     --expected-fingerprint "$EXPECTED_PREPARED_FINGERPRINT" \
     --expected-manifest-sha256 "$EXPECTED_PREPARED_MANIFEST_SHA256" \
     --expected-status "$expected_status" --expected-steps "$steps_expected" \
-    --max-gpu-gib "$MAX_GPU_GIB" --expected-model-revision "$MODEL_REVISION"
+    --max-gpu-gib "$MAX_GPU_GIB" --min-headroom-gib "$MIN_HEADROOM_GIB" \
+    --cache-reclaim-trigger-gib "$CACHE_RECLAIM_TRIGGER_GIB" \
+    --expected-model-revision "$MODEL_REVISION" \
+    --expected-train-count "$DATASET_TRAIN_COUNT" --expected-val-count "$DATASET_VAL_COUNT"
   step_pass
 }
 
 STRESS_RUN=''
 STABILITY_RUN=''
-run_stage stress '01' 'G01C_V1_STRESS_PASS_NOT_M1_TRAINING' "$STRESS_STEPS"
+run_stage stress '01' 'G01D_V4_STRESS_PASS_NOT_M1_TRAINING' "$STRESS_STEPS"
 STRESS_RUN="$RUN_DIR"
-run_stage stability '02' 'G01C_V1_STABILITY_PASS_NOT_M1_TRAINING' "$STABILITY_STEPS"
+run_stage stability '02' 'G01D_V4_STABILITY_PASS_NOT_M1_TRAINING' "$STABILITY_STEPS"
 STABILITY_RUN="$RUN_DIR"
-run_stage train '03' 'G01C_V1_M1_SOURCE_ONLY_TRAINING_COMPLETE' "$MAX_STEPS"
+run_stage train '03' 'G01D_V4_M1_SOURCE_ONLY_TRAINING_COMPLETE' "$MAX_STEPS"
 TRAIN_RUN="$RUN_DIR"
 
 step_begin 'FINAL_ADAPTER_VERIFY'

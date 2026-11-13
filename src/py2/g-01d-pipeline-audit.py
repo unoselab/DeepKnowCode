@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G-01d v1: read-only evidence checks and immutable pipeline completion records.
+"""G-01d v4: read-only evidence checks and immutable pipeline completion records.
 
 All experiment-specific inputs are mandatory shell-supplied CLI arguments.
 Does not train, select datasets, modify prior runs, or load model weights.
@@ -54,7 +54,7 @@ def artifact(run, envelope, name):
 
 def verify_checkpoint(ckpt, prepared_hash, fingerprint, expected_step):
     meta = read_json(ckpt / 'checkpoint_manifest.json')
-    need(meta['status'] == 'G01C_V1_CHECKPOINT_COMPLETE',
+    need(meta['status'] == 'G01D_V4_CHECKPOINT_COMPLETE',
          'checkpoint incomplete: ' + str(ckpt))
     need(meta['config_fingerprint'] == fingerprint and
          meta['prepared_manifest_sha256'] == prepared_hash,
@@ -73,7 +73,7 @@ def verify_checkpoint(ckpt, prepared_hash, fingerprint, expected_step):
 def validate_prepare(a):
     run = a.prepared_run.resolve()
     need(sha256(a.engine) == a.expected_engine_sha256,
-         'G-01c Python engine SHA256 drift; must not run unreviewed implementation')
+         'G-01d Python engine SHA256 drift; must not run unreviewed implementation')
     manifest_file = run / 'prepared' / 'manifest.json'
     need(sha256(manifest_file) == a.expected_manifest_sha256,
          'pinned prepared manifest SHA256 mismatch')
@@ -127,6 +127,33 @@ def validate_prepare(a):
                       'at_chicago':chicago()}), flush=True)
 
 
+def verify_gpu_memory(rows, a):
+    """Require true tensor peak and post-reclaim physical GPU headroom evidence.
+
+    Allocator reserved memory may exceed placement budget without exceeding the
+    budget for active tensors; it is intentionally NOT a hard failure check.
+    """
+    need(isinstance(rows,list) and rows, 'missing GPU memory evidence')
+    for entry in rows:
+        need(isinstance(entry,dict) and 'gpu' in entry, 'bad GPU memory row')
+        fields=('allocated_gib','reserved_gib','peak_allocated_gib',
+                'driver_free_gib','driver_total_gib','inactive_cache_gib')
+        need(all(key in entry and isinstance(entry[key], (int,float)) and
+                 math.isfinite(entry[key]) for key in fields),
+             'incomplete or nonfinite CUDA memory accounting')
+        need(entry['allocated_gib'] >= 0 and entry['reserved_gib'] >= 0 and
+             entry['inactive_cache_gib'] >= 0, 'negative allocator accounting')
+        need(entry['peak_allocated_gib'] < a.max_gpu_gib and
+             entry['allocated_gib'] < a.max_gpu_gib,
+             'GPU actual tensor allocation exceeded hard cap')
+        need(entry['driver_free_gib'] >= a.min_headroom_gib,
+             'driver free VRAM below minimum headroom')
+        need(entry['driver_total_gib'] >= entry['driver_free_gib'] > 0,
+             'invalid driver free and total VRAM evidence')
+        need(entry['reserved_gib'] + 0.01 >= entry['allocated_gib'],
+             'PyTorch allocator accounting inconsistent')
+
+
 def validate_stage(a):
     run = a.stage_run.resolve()
     env = read_json(run / 'run_manifest.json')
@@ -135,7 +162,22 @@ def validate_stage(a):
          'stage config fingerprint drift')
     need(env.get('effective_parameters', {}).get('revision') == a.expected_model_revision,
          'stage pinned model revision drift')
+    params=env.get('effective_parameters', {})
+    need(float(params.get('max_gpu_gib',-1)) == a.max_gpu_gib and
+         float(params.get('min_headroom_gib',-1)) == a.min_headroom_gib and
+         float(params.get('cache_reclaim_trigger_gib',-1)) == a.cache_reclaim_trigger_gib,
+         'GPU memory policy drift from standalone Shell configuration')
     prepared_hash = a.expected_manifest_sha256
+    token_audit = read_json(artifact(run, env, 'token_audit.json'))
+    frozen_date = read_json(a.prepared_run / 'prepared/manifest.json')['at_chicago'][:10]
+    need(token_audit.get('template_date') == frozen_date and
+         env.get('effective_parameters', {}).get('template_date') == frozen_date,
+         'pinned Harmony date drift from frozen prepared run')
+    need(token_audit['status'] == 'G01D_V4_PREPARED_TOKEN_CACHE_VERIFIED' and
+         token_audit['config_fingerprint'] == a.expected_fingerprint and
+         token_audit['verified_before_model_loading'] is True and
+         token_audit['split_counts'] == {'train': a.expected_train_count, 'validation': a.expected_val_count},
+         'invalid or incomplete verified Harmony token cache')
     stage = run.name.rsplit('-', 1)[-1]
     if stage in ('stress', 'stability'):
         report = read_json(artifact(run,env,stage+'.json'))
@@ -153,9 +195,10 @@ def validate_stage(a):
             need(math.isfinite(item['loss']) and item['loss'] >= 0 and
                  math.isfinite(item['gradient_norm_before_clip']),
                  'nonfinite stress/stability evidence')
-            for gpu in item['gpu_memory']:
-                need(gpu['peak_allocated_gib'] < a.max_gpu_gib,
-                     'GPU peak allocation exceeded limit')
+            verify_gpu_memory(item['gpu_memory'],a)
+            need(isinstance(item.get('inactive_cache_reclaim_events'),int) and
+                 item['inactive_cache_reclaim_events'] >= 0,
+                 'missing CUDA cache maintenance evidence')
         ckpt = run / 'checkpoints' / f'step-{a.expected_steps:06d}'
         checkpoint_manifest = artifact(run,env,
                     f'checkpoints/step-{a.expected_steps:06d}/checkpoint_manifest.json')
@@ -166,6 +209,24 @@ def validate_stage(a):
         summary = read_json(artifact(run,env,'training_summary.json'))
         history_file = artifact(run,env,'training_history.jsonl')
         identity = read_json(artifact(run,env,'adapter_manifest.json'))
+        policy=summary.get('memory_policy',{})
+        need(policy.get('max_active_gib') == a.max_gpu_gib and
+             policy.get('min_driver_free_gib') == a.min_headroom_gib and
+             policy.get('cache_reclaim_trigger_gib') == a.cache_reclaim_trigger_gib and
+             policy.get('reserved_gib_is_not_hard_cap') is True,
+             'training summary CUDA memory policy mismatch')
+        optimizer_events=[]
+        for line in history_file.read_text(encoding='utf-8').splitlines():
+            need(bool(line.strip()),'blank full training history line')
+            item=json.loads(line)
+            if item.get('event')=='OPTIMIZER_STEP':
+                verify_gpu_memory(item.get('gpu_memory'),a)
+                need(isinstance(item.get('inactive_cache_reclaim_events'),int) and
+                     item['inactive_cache_reclaim_events'] >= 0,
+                     'missing per-step cache reclaim event count')
+                optimizer_events.append(item['optimizer_step'])
+        need(optimizer_events == list(range(1,a.expected_steps+1)),
+             'full optimizer history steps missing/duplicated/out-of-order')
         need(summary['status'] == a.expected_status and
              summary['optimizer_steps'] == a.expected_steps and
              summary['prepared_manifest_sha256'] == prepared_hash and
@@ -174,12 +235,13 @@ def validate_stage(a):
         need(not summary['is_resumed'] and
              summary['newly_executed_steps'] == a.expected_steps,
              'unexpected resume/short training')
-        need(identity['status'] == 'G01C_V1_M1_ADAPTER_COMPLETE' and
+        need(identity['status'] == 'G01D_V4_M1_ADAPTER_COMPLETE' and
              identity['optimizer_steps'] == a.expected_steps and
              identity['prepared_manifest_sha256'] == prepared_hash and
              identity['config_fingerprint'] == a.expected_fingerprint,
              'adapter model identity mismatch')
         need(summary['training_history_sha256'] == sha256(history_file) and
+             summary['token_audit_sha256'] == sha256(run/'token_audit.json') and
              summary['adapter_manifest_sha256'] == sha256(run / 'adapter_manifest.json'),
              'training history/adapter manifest SHA256 drift')
         adapter = run / 'adapter'
@@ -220,18 +282,18 @@ def finalize(a):
              'PASS pipeline must include all stages')
         env = read_json(a.train_run / 'run_manifest.json')
         summary = read_json(a.train_run / 'training_summary.json')
-        need(env['status'] == 'G01C_V1_M1_SOURCE_ONLY_TRAINING_COMPLETE' and
+        need(env['status'] == 'G01D_V4_M1_SOURCE_ONLY_TRAINING_COMPLETE' and
              summary['optimizer_steps'] == a.expected_steps and
              len(summary['validation_events']) == a.expected_val_events and
              summary['prepared_manifest_sha256'] == a.expected_manifest_sha256 and
              summary['config_fingerprint'] == a.fingerprint,
              'full M1 evidence not complete')
-        result_status = 'G01D_V1_FULL_M1_TRAINING_COMPLETE'
+        result_status = 'G01D_V4_FULL_M1_TRAINING_COMPLETE'
     else:
         need(a.status == 'FAIL' and a.exit_code != 0,
              'invalid pipeline FAIL report exit code')
-        result_status = 'G01D_V1_PIPELINE_FAILED'
-    item={'version':'v1','status':result_status,'at_chicago':chicago(),
+        result_status = 'G01D_V4_PIPELINE_FAILED'
+    item={'version':'v4','status':result_status,'at_chicago':chicago(),
           'failure_or_final_step':a.step,'exit_code':a.exit_code,
           'elapsed_seconds':a.elapsed_seconds, 'log_file':str(a.log_file),
           'prepared_run':str(a.prepared_run),'config_fingerprint':a.fingerprint,
@@ -262,6 +324,10 @@ def parser():
         stage.add_argument('--'+name,required=True,type=Path if name.endswith('-run') else str)
     stage.add_argument('--expected-steps',required=True,type=int)
     stage.add_argument('--max-gpu-gib',required=True,type=float)
+    stage.add_argument('--min-headroom-gib',required=True,type=float)
+    stage.add_argument('--cache-reclaim-trigger-gib',required=True,type=float)
+    stage.add_argument('--expected-train-count',required=True,type=int)
+    stage.add_argument('--expected-val-count',required=True,type=int)
     final = actions.add_parser('final-report')
     for name in ('pipeline','status','step','exit-code','log-file','prepared-run',
                  'fingerprint','elapsed-seconds'):
