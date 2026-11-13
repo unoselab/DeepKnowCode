@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# F-01e v3: standalone, fail-closed frozen M2 -> verified 4D scores -> Curriculum Order.
+# F-01e v4: standalone, fail-closed frozen M2 -> verified 4D scores -> Curriculum Order.
 # Does NOT invoke any other shell wrapper and does NOT run GPU training.
 # Prerequisite: existing unmodified v1 core src/py2/f-01e-score-curriculum.py
 # Modes: --inspect, --prepare, --audit /absolute/prepare-run
@@ -9,6 +9,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN="${F01E_PYTHON_BIN:-python}"
 CORE_PY="$ROOT/src/py2/f-01e-score-curriculum.py"
 EVIDENCE_PY="$ROOT/src/py2/f01e-score-evidence.py"
+D04_SCORER_PY="$ROOT/src/py2/f01e-d04-effective-scoring.py"
 MODE="${1:---inspect}"
 if (( $# )); then shift; fi
 case "$MODE" in
@@ -19,7 +20,7 @@ esac
 
 # === All effective experiment configuration is owned by this Shell ===
 EXPERIMENT="F-01e"
-VERSION="v3"
+VERSION="v4"
 MODEL_ID="meta-llama/CodeLlama-7b-hf"
 MODEL_REVISION="b462c3c99b077d341db691ec780a33156f3c1472"
 MODEL_MODE="codellama-7b"
@@ -55,10 +56,19 @@ COMPONENT_FIELDS=(d_sim d_cf d_len d_df)
 SCORE_WEIGHTS=(0.45 0.25 0.20 0.10)
 SCORE_TOLERANCE="0.000001"
 REQUIRE_EFFECTIVE_CODE_SHA256="true"
-# Server-managed input configuration: no environment exports are required.
-# Put the independently generated, reviewed 19,464-row D-04 file at this path.
-# Its own score_provenance field must identify the actual scoring audit.
-COMPONENT_FILE="$ROOT/results/f-01e/verified_d04_components.jsonl"
+# Reuse original D-04 v2 metric definitions and D-04 v5 explicit fallback.
+D04_PARSER_VERSION_POLICY="d04-v2-tree-sitter-wrap"
+D04_NORMALIZATION_POLICY="d04-v2-corpus-train-p05-p95"
+D04_SIMILARITY_POLICY="d04-v2-sequencematcher-autojunk-true"
+D04_AST_FALLBACK_POLICY="d04-v5-corpus-label-median-explicit"
+D04_PERCENTILE_LOW="0.05"
+D04_PERCENTILE_HIGH="0.95"
+D04_EXPECTED_VARIANTS=8
+D04_PROGRESS_INTERVAL=2000
+FROZEN_DATASET_MANIFEST="$FROZEN_PREPARED_RUN/prepared/manifest.json"
+D04_PROVENANCE="F01E_V4_RECOMPUTED_D04_V2_CODE_AST_ON_F01C_FROZEN"
+# Output is generated under unique --prepare run, not externally provided.
+COMPONENT_FILE=""
 COMPONENT_SHA256=""
 SCORE_FILE=""
 SCORE_SHA256=""
@@ -85,25 +95,14 @@ PYIN
     [[ -n "$SCORE_PROVENANCE" ]] || { log 'AUDIT_SCORE_PROVENANCE_MISSING'; return 2; }
     return 0
   fi
-  [[ -f "$COMPONENT_FILE" ]] || {
-    log "BLOCKED: verified D-04 component file missing: $COMPONENT_FILE"; return 2;
-  }
-  COMPONENT_SHA256="$(sha256sum "$COMPONENT_FILE" | awk '{print $1}')"
-  SCORE_PROVENANCE="$("$PYTHON_BIN" - "$COMPONENT_FILE" <<'PYIN'
-import json,sys
-with open(sys.argv[1],encoding='utf-8') as f:
-    row=json.loads(f.readline())
-print(row.get('score_provenance',''))
-PYIN
-)"
-  [[ -n "$SCORE_PROVENANCE" && "$SCORE_PROVENANCE" != UNVERIFIED ]] || {
-    log 'BLOCKED: component JSONL first row must provide an independently verified score_provenance'; return 2;
-  }
-  log "COMPONENT_INPUT=$COMPONENT_FILE COMPONENT_SHA256=$COMPONENT_SHA256 PROVENANCE=$SCORE_PROVENANCE"
+  # --prepare computes measured components from frozen F-01c effective code.
+  COMPONENT_FILE="$RESULTS_DIR/$TS-$RID-components/verified_d04_components.jsonl"
+  SCORE_PROVENANCE="$D04_PROVENANCE"
+  log "D04_COMPONENT_OUTPUT=$COMPONENT_FILE PROVENANCE=$SCORE_PROVENANCE"
 }
 LOG_DIR="$ROOT/logs/f-01e/$MODEL_MODE"
 RESULTS_DIR="$ROOT/results/f-01e/$MODEL_MODE"
-LOG_PREFIX="f-01e-v3"
+LOG_PREFIX="f-01e-v4"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 LOG_CAPTURE_STDOUT="true"
 LOG_CAPTURE_STDERR="true"
@@ -141,14 +140,38 @@ validate_sources() {
     log 'BLOCKED: F01E_SCORE_PROVENANCE must identify verified D-04 computation evidence'; return 2;
   }
   if [[ "$MODE" == --prepare ]]; then
-    [[ -f "$EVIDENCE_PY" && -f "$COMPONENT_FILE" && -n "$COMPONENT_SHA256" ]] || {
-      log 'BLOCKED: evidence script, configured component file, and its SHA256 required'; return 2;
+    [[ -f "$EVIDENCE_PY" && -f "$D04_SCORER_PY" && -f "$FROZEN_DATASET_MANIFEST" ]] || {
+      log 'BLOCKED: D04 scorer, evidence validator, and frozen manifest required'; return 2;
     }
   else
     [[ -n "$SCORE_FILE" && -f "$SCORE_FILE" && -n "$SCORE_SHA256" ]] || {
       log 'BLOCKED: prepared score file and SHA256 are required. No scores inferred from token counts or pair IDs.'; return 2;
     }
   fi
+}
+generate_d04_components() {
+  local output="$RESULTS_DIR/$TS-$RID-components"
+  "$PYTHON_BIN" -u "$D04_SCORER_PY" \
+    --root "$ROOT" \
+    --frozen-train "$FROZEN_PREPARED_RUN/prepared/train.jsonl" \
+    --frozen-manifest "$FROZEN_DATASET_MANIFEST" \
+    --frozen-train-sha256 "$FROZEN_TRAIN_SHA256" \
+    --frozen-manifest-sha256 "$FROZEN_MANIFEST_SHA256" \
+    --output-dir "$output" --expected-count "$TRAIN_COUNT" \
+    --expected-variant-pairs "$D04_EXPECTED_VARIANTS" \
+    --max-seq-length "$MAX_SEQ_LENGTH" \
+    --component-policy "$COMPONENT_POLICY" \
+    --score-provenance "$D04_PROVENANCE" \
+    --ast-fallback-policy "$D04_AST_FALLBACK_POLICY" \
+    --parser-version-policy "$D04_PARSER_VERSION_POLICY" \
+    --normalization-policy "$D04_NORMALIZATION_POLICY" \
+    --similarity-policy "$D04_SIMILARITY_POLICY" \
+    --percentile-low "$D04_PERCENTILE_LOW" \
+    --percentile-high "$D04_PERCENTILE_HIGH" \
+    --score-weights "${SCORE_WEIGHTS[@]}" \
+    --progress-interval "$D04_PROGRESS_INTERVAL"
+  COMPONENT_SHA256="$(sha256sum "$COMPONENT_FILE" | awk '{print $1}')"
+  log "D04_COMPONENTS_READY FILE=$COMPONENT_FILE SHA256=$COMPONENT_SHA256"
 }
 materialize_verified_scores() {
   local out="$RESULTS_DIR/$TS-$RID-scores"
@@ -210,6 +233,7 @@ main() {
   step 'VALIDATE_INPUTS' validate_sources || return $?
   if [[ "$MODE" != --inspect ]]; then
     if [[ "$MODE" == --prepare ]]; then
+      step 'D04_EFFECTIVE_CODE_SCORING' generate_d04_components || return $?
       step 'MATERIALIZE_VERIFIED_SCORES' materialize_verified_scores || return $?
     fi
     step 'VERIFY_SCORE_SHA256' check_score_sha || return $?
