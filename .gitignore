@@ -30,6 +30,8 @@ data
 # Temporary files
 *.tmp
 *.swp
+# macOS metadata
+._*
 .DS_Store
 
 # IDE
