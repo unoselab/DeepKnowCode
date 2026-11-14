@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G-03c v3: audited GPT-OSS-120B M3 curriculum; M1 -> M3 independent branch.
+"""G-03c v4: audited GPT-OSS-120B M3 curriculum; M1 -> M3 independent branch.
 
 This controller vendors the exact completed G-02 v2 MXFP4 training kernel as a
 separate, hash-pinned Python module. No G-02 wrapper or M2 adapter is invoked.
@@ -17,11 +17,11 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-VERSION = 'v3'
+VERSION = 'v4'
 DOMAINS = ('java_source', 'java_mixed', 'python_mixed')
 G03B_STATUS = 'G03B_V1_CURRICULUM_PREPARED_AUDIT_PASS_NOT_TRAINED'
-AUDIT_STATUS = 'G03C_V3_CPU_CURRICULUM_AUDIT_PASS_NOT_TRAINED'
-TRAIN_STATUS = 'G03C_V3_M3_CURRICULUM_TRAINING_COMPLETE_RESEARCH_PENDING_REVIEW'
+AUDIT_STATUS = 'G03C_V4_CPU_CURRICULUM_AUDIT_PASS_NOT_TRAINED'
+TRAIN_STATUS = 'G03C_V4_M3_CURRICULUM_TRAINING_COMPLETE_RESEARCH_PENDING_REVIEW'
 
 
 def require(ok, message):
@@ -390,7 +390,7 @@ def run_smoke(c,a,core):
     if c.stage=='stability':
         core.verify_stages(a,prepared_hash)
     core.smoke(a,tok,rows,codes,prepared_hash)
-    proof={'version':VERSION,'status':'G03C_V3_'+c.stage.upper()+'_PASS_REUSING_PINNED_G02_KERNEL',
+    proof={'version':VERSION,'status':'G03C_V4_'+c.stage.upper()+'_PASS_REUSING_PINNED_G02_KERNEL',
            'at_chicago':chicago(),'g03b_order_sha256':c.g03b_order_sha256,
            'm1_initial_adapter_sha256':c.m1_adapter_sha256,
            'core_runtime_status':'G02_V2_'+c.stage.upper()+'_PASS_NOT_M2_TRAINING',
@@ -407,7 +407,7 @@ def require_smoke_proofs(c,a,core):
     for stage,d in (('stress',c.stress_run),('stability',c.stability_run)):
         require(d is not None,'MISSING_'+stage.upper()+'_PROOF')
         proof=load(d/'g03c_stage_proof.json')
-        require(proof['status']=='G03C_V3_'+stage.upper()+'_PASS_REUSING_PINNED_G02_KERNEL' and
+        require(proof['status']=='G03C_V4_'+stage.upper()+'_PASS_REUSING_PINNED_G02_KERNEL' and
                 proof['g03b_order_sha256']==c.g03b_order_sha256 and
                 proof['m1_initial_adapter_sha256']==c.m1_adapter_sha256 and
                 proof['g02_kernel_run_manifest_sha256']==sha(d/'run_manifest.json'),
@@ -432,7 +432,7 @@ def m3_checkpoint(c,a,core,model,opt,tok,step,ledger_digest):
         'consumed_prefix_row_index_sha256':ledger_digest},dest/'optimizer_state.pt')
     files={str(p.relative_to(dest)):sha(p) for p in dest.rglob('*') if p.is_file()}
     require('optimizer_state.pt' in files,'EMPTY_M3_CHECKPOINT')
-    meta={'version':VERSION,'status':'G03C_V3_CURRICULUM_CHECKPOINT_COMPLETE',
+    meta={'version':VERSION,'status':'G03C_V4_CURRICULUM_CHECKPOINT_COMPLETE',
           'at_chicago':chicago(),'optimizer_step':step,
           'g02_fingerprint':core.fingerprint(a),
           'prepared_manifest_sha256':c.g02_prepared_manifest_sha256,
@@ -544,7 +544,7 @@ def run_train(c,a,core):
     files={str(p.relative_to(final)):sha(p) for p in final.rglob('*') if p.is_file()}
     require('adapter_model.safetensors' in files,'M3_FINAL_ADAPTER_MISSING')
     write_new(a.run_dir/'adapter_manifest.json',{
-        'version':VERSION,'status':'G03C_V3_M3_ADAPTER_COMPLETE',
+        'version':VERSION,'status':'G03C_V4_M3_ADAPTER_COMPLETE',
         'adapter_files_sha256':files,'initial_m1_adapter_sha256':c.m1_adapter_sha256,
         'g03b_order_sha256':c.g03b_order_sha256,'optimizer_steps':c.optimizer_steps,
         'consumption_ledger_sha256':sha(ledger),'at_chicago':chicago()})
@@ -607,7 +607,7 @@ def verify_training(c,a,core):
     m=load(c.train_run/'g03c_train_manifest.json')
     am=load(c.train_run/'adapter_manifest.json')
     require(s.get('status')==TRAIN_STATUS and m.get('status')==TRAIN_STATUS and
-            am.get('status')=='G03C_V3_M3_ADAPTER_COMPLETE',
+            am.get('status')=='G03C_V4_M3_ADAPTER_COMPLETE',
             'M3_TRAINING_STATUS_INCOMPLETE')
     require(s['g03b_order_sha256']==c.g03b_order_sha256 and
             s['initial_m1_adapter_sha256']==c.m1_adapter_sha256 and
@@ -645,7 +645,7 @@ def verify_training(c,a,core):
     for folder in sorted((c.train_run/'checkpoints').glob('step-*')):
         meta=load(folder/'checkpoint_manifest.json')
         step=meta['optimizer_step']
-        require(meta['status']=='G03C_V3_CURRICULUM_CHECKPOINT_COMPLETE' and
+        require(meta['status']=='G03C_V4_CURRICULUM_CHECKPOINT_COMPLETE' and
                 meta['g03b_curriculum_order_sha256']==c.g03b_order_sha256 and
                 meta['g03c_experiment_fingerprint']==experiment_fingerprint(c,a,core) and
                 meta['initial_m1_adapter_sha256']==c.m1_adapter_sha256 and
@@ -658,7 +658,7 @@ def verify_training(c,a,core):
         ckpts.append(step)
     require(ckpts and ckpts[-1]==c.optimizer_steps,
             'FINAL_M3_CHECKPOINT_NOT_VERIFIED')
-    out={'version':VERSION,'status':'G03C_V3_INDEPENDENT_FULL_M3_VERIFY_PASS',
+    out={'version':VERSION,'status':'G03C_V4_INDEPENDENT_FULL_M3_VERIFY_PASS',
          'run':str(c.train_run),'steps':c.optimizer_steps,'pairs':c.train_pairs,
          'curriculum_order_sha256':c.g03b_order_sha256,
          'adapter_model_sha256':am['adapter_files_sha256']['adapter_model.safetensors'],

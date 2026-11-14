@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# G-03c v3. Independent M3 curriculum from the SAME G01d M1 adapter as G02 M2.
+# G-03c v4. Independent M3 curriculum from the SAME G01d M1 adapter as G02 M2.
 # Frozen G02 data, G03a scores, G03b exact 811x24 order. No other shell wrapper invoked.
-# GPU training is exploratory and requires explicit --train-research invocation.
+# --train is operator-authorized exploratory M3; pending review remains documented.
 set -Eeuo pipefail
 export TZ=America/Chicago
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN="python"
 PYFILE="$ROOT/src/py2/g-03c-train-curriculum-lora.py"
 ENGINE="$ROOT/src/py2/g-03c-training-kernel.py"
-VERSION="v3"
+VERSION="v4"
 CORE_VERSION="v2"
 CONDA_ENV="deepknowcode-gptoss"
 MODEL_ID="openai/gpt-oss-120b"
@@ -143,19 +143,18 @@ PYTHON_VAL_COUNT=40
 # Logging: Chicago, unique, stdout+stderr captured via tee, no overwrites.
 LOG_DIR="$ROOT/logs/g-03/gpt-oss-120b"
 RESULTS_DIR="$ROOT/results/g-03/gpt-oss-120b"
-LOG_PREFIX="g-03c-v3"
+LOG_PREFIX="g-03c-v4"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 LOG_TEE_OPTIONS='-a'
 LOG_CAPTURE_STDOUT="true"
 LOG_CAPTURE_STDERR="true"
 LOG_PIPEFAIL="true"
-[[ $# -ge 1 ]] || { echo 'Usage: --audit | --train-research | --verify M3_PIPELINE' >&2; exit 2; }
+[[ $# -ge 1 ]] || { echo 'Usage: --audit | --train | --verify M3_PIPELINE' >&2; exit 2; }
 MODE="$1"; shift
 case "$MODE" in
-  --audit|--train-research) [[ $# -eq 0 ]] || { echo 'No positional overrides allowed' >&2; exit 2; } ;;
+  --audit|--train) [[ $# -eq 0 ]] || { echo 'No positional overrides allowed' >&2; exit 2; } ;;
   --verify) [[ $# -eq 1 ]] || { echo 'Usage: --verify /absolute/previous-M3-pipeline' >&2; exit 2; }; VERIFY_SOURCE="$1" ;;
-  --train) echo 'BLOCKED: use explicit --train-research to acknowledge unadjudicated-label research risk' >&2; exit 2 ;;
-  *) echo 'Usage: --audit | --train-research | --verify M3_PIPELINE' >&2; exit 2 ;;
+  *) echo 'Usage: --audit | --train | --verify M3_PIPELINE' >&2; exit 2 ;;
 esac
 [[ -f "$PYFILE" && -f "$ENGINE" ]] || { echo 'Missing G03c controller or vendored kernel' >&2;exit 2; }
 [[ "${CONDA_DEFAULT_ENV:-}" == "$CONDA_ENV" ]] || { echo "Activate conda env: $CONDA_ENV" >&2;exit 2; }
@@ -175,7 +174,7 @@ exec > >(tee "$LOG_TEE_OPTIONS" "$LOG_FILE") 2>&1
 START_SEC="$(date +%s)"
 ACTIVE_STAGE="init"
 RESEARCH_ACKNOWLEDGED="false"
-if [[ "$MODE" == '--train-research' ]]; then RESEARCH_ACKNOWLEDGED="true"; fi
+if [[ "$MODE" == '--train' ]]; then RESEARCH_ACKNOWLEDGED="true"; fi
 PREPARED_RUN="$G02_PIPELINE/00-prepare"
 STRESS_RUN=''
 STABILITY_RUN=''
@@ -353,10 +352,14 @@ printf '[G-03c %s] G03B_ORDER_SHA256=%s M1_SHA256=%s G02_FROZEN_SHA256=%s\n' \
    "$VERSION" "$G03B_ORDER_SHA256" "$M1_ADAPTER_SHA256" "$G02_PREPARED_TRAIN_SHA256"
 printf '[G-03c %s] RESEARCH_ACKNOWLEDGED=%s TRAINING_APPROVED=%s LABEL_REVIEW=%s\n' \
    "$VERSION" "$RESEARCH_ACKNOWLEDGED" "$TRAINING_APPROVED" "$MANUAL_LABEL_REVIEW_STATUS"
+if [[ "$MODE" == '--train' ]]; then
+  printf '[G-03c %s] OPERATOR_ASSUMPTION=LABEL_REVIEW_ASSUMED_CONFIRMED; FROZEN_EVIDENCE_STATUS=%s; INDEPENDENT_REVIEW_NOT_VERIFIED_BY_THIS_RUN=true\n' \
+    "$VERSION" "$MANUAL_LABEL_REVIEW_STATUS"
+fi
 if [[ "$MODE" == '--audit' ]]; then
   run_stage audit 00
-elif [[ "$MODE" == '--train-research' ]]; then
-  # Research mode never changes independent review approval status.
+elif [[ "$MODE" == '--train' ]]; then
+  # Operator-authorized research training; preserve actual pending-review provenance.
   run_stage audit 00
   run_stage stress 01
   run_stage stability 02
