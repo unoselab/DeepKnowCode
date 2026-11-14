@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G-04a v1 standalone GPT-OSS-120B Python heldout evaluation; no training.
+# G-04a v2 standalone GPT-OSS-120B Python heldout evaluation; no training.
 set -Eeuo pipefail
 export TZ=America/Chicago
 export TOKENIZERS_PARALLELISM=false
@@ -7,23 +7,72 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN="${G04A_PYTHON_BIN:-python}"
 ENGINE="$ROOT/src/py2/g-04a-evaluate.py"
 MODE="${1:-}"
+# Frozen G-03d v1 PASS run from Chicago 2026-11-14 12:02:17. Never search by mtime.
+# Reproducible Shell configuration; explicit CLI path continues to override it.
+G03D_PINNED_RUN_REL="results/g-03/gpt-oss-120b/2026-1114-120217-1794679337-26708-18378-g03d-verify"
+G03D_PINNED_RUN="$ROOT/$G03D_PINNED_RUN_REL"
+G03D_PINNED_REPORT_SHA256="c372e75ca051fd77307b71f663b4dac7529d8f1ee7607342d3b059cfb9de614b"
+G03D_INPUT_SELECTION=""
 [[ -f "$ENGINE" ]] || { echo "Missing G04A Python engine: $ENGINE" >&2; exit 2; }
+# All modes accept the pinned G-03d run by default and still allow an explicit path.
+# If the pinned G-03d source is absent, fail rather than choosing a different run.
 case "$MODE" in
   --preflight|--evaluate)
-    [[ $# -eq 2 && -d "$2" ]] || { echo "USAGE: bash $0 $MODE <G03D_verified_run_dir>" >&2; exit 2; }
-    G03D_RUN="$(cd "$2" && pwd -P)"
+    [[ $# -ge 1 && $# -le 2 ]] || {
+      echo "USAGE: bash $0 $MODE [G03D_verified_run_dir]" >&2; exit 2;
+    }
+    if [[ $# -eq 2 ]]; then
+      G03D_SOURCE="$2"
+      G03D_INPUT_SELECTION="EXPLICIT"
+    else
+      G03D_SOURCE="$G03D_PINNED_RUN"
+      G03D_INPUT_SELECTION="PINNED_G03D_V1_PASS"
+    fi
     EVAL_RUN=""
     ;;
   --verify)
-    [[ $# -eq 3 && -d "$2" && -d "$3" ]] || { echo "USAGE: bash $0 --verify <G04A_eval_run_dir> <G03D_verified_run_dir>" >&2; exit 2; }
-    EVAL_RUN="$(cd "$2" && pwd -P)"
-    G03D_RUN="$(cd "$3" && pwd -P)"
+    [[ $# -ge 2 && $# -le 3 ]] || {
+      echo "USAGE: bash $0 --verify <G04A_eval_run_dir> [G03D_verified_run_dir]" >&2; exit 2;
+    }
+    EVAL_SOURCE="$2"
+    if [[ $# -eq 3 ]]; then
+      G03D_SOURCE="$3"
+      G03D_INPUT_SELECTION="EXPLICIT"
+    else
+      G03D_SOURCE="$G03D_PINNED_RUN"
+      G03D_INPUT_SELECTION="PINNED_G03D_V1_PASS"
+    fi
     ;;
-  *) echo "USAGE: bash $0 --preflight|--evaluate <G03D_run>; or --verify <G04A_run> <G03D_run>" >&2; exit 2;;
+  *)
+    echo "USAGE: bash $0 --preflight|--evaluate [G03D_run]; or --verify <G04A_run> [G03D_run]" >&2
+    exit 2
+    ;;
 esac
+[[ -d "$G03D_SOURCE" ]] || {
+  echo "G03D_VERIFIED_RUN_NOT_FOUND:$G03D_SOURCE (pass explicit verified G03D run path to override)" >&2
+  exit 2
+}
+G03D_RUN="$(cd "$G03D_SOURCE" && pwd -P)"
+if [[ "$G03D_INPUT_SELECTION" == PINNED_G03D_V1_PASS ]]; then
+  [[ -f "$G03D_RUN/verification_report.json" && -f "$G03D_RUN/verification_manifest.json" ]] || {
+    echo "G03D_PINNED_PROOF_FILES_MISSING:$G03D_RUN" >&2; exit 2;
+  }
+  # This pins the actual independently verified G-03d evidence, not just the folder name.
+  ACTUAL_G03D_REPORT_SHA256="$(sha256sum "$G03D_RUN/verification_report.json")"
+  ACTUAL_G03D_REPORT_SHA256="${ACTUAL_G03D_REPORT_SHA256%% *}"
+  [[ "$ACTUAL_G03D_REPORT_SHA256" == "$G03D_PINNED_REPORT_SHA256" ]] || {
+    echo "G03D_PINNED_REPORT_SHA256_MISMATCH:$G03D_RUN" >&2; exit 2;
+  }
+fi
+if [[ "$MODE" == '--verify' ]]; then
+  [[ -d "$EVAL_SOURCE" ]] || {
+    echo "G04A_EVALUATION_RUN_NOT_FOUND:$EVAL_SOURCE" >&2; exit 2;
+  }
+  EVAL_RUN="$(cd "$EVAL_SOURCE" && pwd -P)"
+fi
 
 # Explicit Shell-side frozen experiment parameters. Python has no experiment defaults.
-VERSION="v1"
+VERSION="v2"
 MODEL_ID="openai/gpt-oss-120b"
 REVISION="b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
 MODEL_TYPE="gpt_oss"
@@ -80,7 +129,7 @@ SEED=2026
 PROGRESS_EVERY=100
 CACHE_CLEAR_EVERY=100
 LOG_DIR="$ROOT/logs/g-04/gpt-oss-120b"
-LOG_PREFIX="g-04a-v1"
+LOG_PREFIX="g-04a-v2"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 RESULTS_DIR="$ROOT/results/g-04/gpt-oss-120b"
 mkdir -p "$LOG_DIR" "$RESULTS_DIR"
@@ -99,9 +148,9 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 export HF_HOME CUDA_VISIBLE_DEVICES="$DEVICE_IDS"
 chicago() { TZ=America/Chicago date '+%Y-%m-%dT%H:%M:%S%:z'; }
 START_EPOCH="$(date +%s)"
-echo "[G-04a v1] START MODE=$MODE CHICAGO=$(chicago) RUN=$RUN_DIR LOG=$LOG_FILE G03D_RUN=$G03D_RUN"
-echo "[G-04a v1] MODEL=$MODEL_ID REVISION=$REVISION MODELS=$MODEL_ORDER GT_SHA256=$EXPECTED_GT_SHA256"
-echo "[G-04a v1] EVAL_N=$EXPECTED_PAIRS EACH_CLASS=$EXPECTED_PER_CLASS PROJECTS=$EXPECTED_PROJECTS THRESHOLD=$DECISION_THRESHOLD INFERENCE=$PRECISION/$QUANT_METHOD/$DEVICE_MAP"
+echo "[G-04a v2] START MODE=$MODE CHICAGO=$(chicago) RUN=$RUN_DIR LOG=$LOG_FILE G03D_RUN=$G03D_RUN G03D_SELECTION=$G03D_INPUT_SELECTION"
+echo "[G-04a v2] MODEL=$MODEL_ID REVISION=$REVISION MODELS=$MODEL_ORDER GT_SHA256=$EXPECTED_GT_SHA256"
+echo "[G-04a v2] EVAL_N=$EXPECTED_PAIRS EACH_CLASS=$EXPECTED_PER_CLASS PROJECTS=$EXPECTED_PROJECTS THRESHOLD=$DECISION_THRESHOLD INFERENCE=$PRECISION/$QUANT_METHOD/$DEVICE_MAP"
 ARGS=(
  --run-dir "$RUN_DIR" --g03d-run "$G03D_RUN" --ground-truth "$GROUND_TRUTH"
  --hf-home "$HF_HOME" --log-file "$LOG_FILE" --model-id "$MODEL_ID"
@@ -138,13 +187,13 @@ stage() {
   local step="$1"; shift
   local started rc
   started="$(date +%s)"
-  echo "[G-04a v1] STEP=$step START CHICAGO=$(chicago)"
+  echo "[G-04a v2] STEP=$step START CHICAGO=$(chicago)"
   if "$PYTHON_BIN" -u "$ENGINE" "$@" "${ARGS[@]}"; then
-    echo "[G-04a v1] STEP=$step PASS EXIT=0 ELAPSED_SECONDS=$(($(date +%s)-started)) CHICAGO=$(chicago)"
+    echo "[G-04a v2] STEP=$step PASS EXIT=0 ELAPSED_SECONDS=$(($(date +%s)-started)) CHICAGO=$(chicago)"
   else
     rc=$?
-    echo "[G-04a v1] STEP=$step FAIL EXIT=$rc ELAPSED_SECONDS=$(($(date +%s)-started)) CHICAGO=$(chicago)"
-    echo "[G-04a v1] FINAL_STATUS=FAIL EXIT=$rc TOTAL_SECONDS=$(($(date +%s)-START_EPOCH)) RUN=$RUN_DIR LOG=$LOG_FILE"
+    echo "[G-04a v2] STEP=$step FAIL EXIT=$rc ELAPSED_SECONDS=$(($(date +%s)-started)) CHICAGO=$(chicago)"
+    echo "[G-04a v2] FINAL_STATUS=FAIL EXIT=$rc TOTAL_SECONDS=$(($(date +%s)-START_EPOCH)) RUN=$RUN_DIR LOG=$LOG_FILE"
     exit "$rc"
   fi
 }
@@ -161,4 +210,4 @@ case "$MODE" in
     ;;
   --verify) stage VERIFY verify;;
 esac
-echo "[G-04a v1] FINAL_STATUS=PASS EXIT=0 TOTAL_SECONDS=$(($(date +%s)-START_EPOCH)) RUN=$RUN_DIR LOG=$LOG_FILE"
+echo "[G-04a v2] FINAL_STATUS=PASS EXIT=0 TOTAL_SECONDS=$(($(date +%s)-START_EPOCH)) RUN=$RUN_DIR LOG=$LOG_FILE"

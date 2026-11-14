@@ -1,0 +1,22 @@
+{
+  "languages": {
+    "java": {
+      "projects": 48,
+      "code_ids": 33658,
+      "code_corpora": 50,
+      "source_lines_scanned": 108538,
+      "pairs": 35194
+    },
+    "python": {
+      "projects": 24,
+      "code_ids": 3006,
+      "code_corpora": 1,
+      "source_lines_scanned": 12919,
+      "pairs": 3808
+    }
+  },
+  "source_provenance": {
+    "rq3_root": "/home/user1-system11/research_dream/2026JournalData/RQ3",
+    "rq4_root": "/home/user1-system11/research_dream/2026JournalData/RQ4/c-evaluate_clone"
+  }
+}
