@@ -12,14 +12,15 @@
       "label_rule": "ID_SECOND_UNDERSCORE_TOKEN_EQUALITY",
       "contradictory_label_groups": 0,
       "dataset_path": "data/evaluation/ground_truth/java",
-      "code_map_path": "data/evaluation/code/java.jsonl",
+      "code_map_path": "data/evaluation/code/java.jsonl"
     },
     "python": {
       "projects": 24,
-      "code_ids": 3006,
-      "code_corpora": 1,
-      "source_lines_scanned": 12919,
-      "pairs": 3808
+      "pairs": 7942,
+      "positive_pairs": 3971,
+      "negative_pairs": 3971,
+      "dataset_path": "data/evaluation/ground_truth/python/verified_pairs.jsonl",
+      "label_field": "gold_label"
     }
   },
   "source_provenance": {

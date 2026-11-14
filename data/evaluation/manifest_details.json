@@ -25,7 +25,7 @@
       "human_verified_gold": false,
       "csv_file_sha256": {
         "pred_RxJava_with_refactorability.csv": "58a2f86e85715ac659eacc3c6600f42315eb866af7fc0e568a8c93051154e273",
-        "pred_activemq_with_refactorability.csv": "59a98c4b8081c76a283da0a21a5344354b7b586d8864ca70d75d06a8ba46fc90",
+        "pred_activemq_with_refactorability.csv": "5d91eb5f1cd0ec9edffab8c75e45282e64ae56e554170f7493618ce1b6ab14b6",
         "pred_ant-ivy_with_refactorability.csv": "6d72f8e84b72fc1c1ab4562ffabc56325dfb9393322d60cd710c1a3bada50ed9",
         "pred_ant_with_refactorability.csv": "dd727f432e5fc725b12efa7a2838d23667d69d18f144e770bc3807c6aa9ffc14",
         "pred_argouml_with_refactorability.csv": "b76673fee3fb98d3f4bbc6487413f270a92f0c1a352772d2c1ac5c9841b90a77",
@@ -72,14 +72,48 @@
         "pred_wicket_with_refactorability.csv": "b2730bbbeead6b0afd3f22f8174fbbcb866db3f5f9accf2409dc761b17a5ab6d",
         "pred_xerces-j_with_refactorability.csv": "6f4e98e6a51f7a175679548c0b9f7f3fdf58a4088b62dfe18c2bb433a159d704",
         "pred_zookeeper_with_refactorability.csv": "9123cefecf0b3aa40d1ee8ba650f0511e8b4156ebde890077cc0dba9c27b77a2"
-      }
+      },
+      "manual_curation_history": [
+        {
+          "timestamp_chicago": "2026-11-14T16:30:33.064087-06:00",
+          "event": "H08_MANUAL_NEGATIVE_REPLACEMENT",
+          "removed_pair": [
+            "activemq_119_159",
+            "activemq_130_271"
+          ],
+          "added_pair": [
+            "activemq_1032_727",
+            "activemq_1202_1047"
+          ],
+          "label": "0",
+          "target_csv": "pred_activemq_with_refactorability.csv",
+          "new_csv_sha256": "5d91eb5f1cd0ec9edffab8c75e45282e64ae56e554170f7493618ce1b6ab14b6",
+          "prior_csv_sha256": "59a98c4b8081c76a283da0a21a5344354b7b586d8864ca70d75d06a8ba46fc90",
+          "manual_review_status": "ACCEPT_NEGATIVE",
+          "h04_h08_reevaluation": "PENDING"
+        }
+      ],
+      "current_snapshot_h04_audit_status": "REVALIDATION_REQUIRED",
+      "current_snapshot_h08_analysis_status": "REVALIDATION_REQUIRED"
     },
     "python": {
       "projects": 24,
-      "code_ids": 3006,
-      "code_corpora": 1,
-      "source_lines_scanned": 12919,
-      "pairs": 3808
+      "pairs": 7942,
+      "positive_pairs": 3971,
+      "negative_pairs": 3971,
+      "dataset_path": "data/evaluation/ground_truth/python/verified_pairs.jsonl",
+      "dataset_sha256": "2d171cdee52f6ab8229853b0cc5590b71e1a7dd6919a417dd88fb17d0ec0cb8c",
+      "label_field": "gold_label",
+      "dataset_provenance": "D-05bj v2 consolidated binary evaluation ground truth",
+      "reference_document": "README-1111-DeepKnowCode-Dataset.md",
+      "ground_truth_status": "CURRENT_HELD_OUT_EVALUATION_GROUND_TRUTH",
+      "previous_snapshot": {
+        "projects": 24,
+        "code_ids": 3006,
+        "code_corpora": 1,
+        "source_lines_scanned": 12919,
+        "pairs": 3808
+      }
     }
   },
   "source_provenance": {
