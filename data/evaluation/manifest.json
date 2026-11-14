@@ -5,7 +5,14 @@
       "code_ids": 33658,
       "code_corpora": 50,
       "source_lines_scanned": 108538,
-      "pairs": 35194
+      "pairs": 35192,
+      "referenced_code_ids": 33658,
+      "positive_pairs": 17596,
+      "negative_pairs": 17596,
+      "label_rule": "ID_SECOND_UNDERSCORE_TOKEN_EQUALITY",
+      "contradictory_label_groups": 0,
+      "dataset_path": "data/evaluation/ground_truth/java",
+      "code_map_path": "data/evaluation/code/java.jsonl",
     },
     "python": {
       "projects": 24,
