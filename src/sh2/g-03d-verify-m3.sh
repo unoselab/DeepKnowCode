@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# G-03d v1: standalone read-only independent verification of the completed GPT-OSS M3.
+set -Eeuo pipefail
+export TZ=America/Chicago
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+PYTHON_BIN="${G03D_PYTHON_BIN:-python}"
+ENGINE="$ROOT/src/py2/g-03d-verify-m3.py"
+MODE="${1:---verify}"
+[[ $# -le 1 && "$MODE" == '--verify' ]] || { echo "USAGE: bash $0 --verify" >&2; exit 2; }
+[[ -f "$ENGINE" ]] || { echo "Missing G03D Python engine: $ENGINE" >&2; exit 2; }
+
+# Shell is the source of truth for all experiment parameters; Python has no silent defaults.
+VERSION="v1"
+EXPERIMENT="g-03d"
+MODEL_ID="openai/gpt-oss-120b"
+MODEL_REVISION="b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+M1_PIPELINE="$ROOT/results/g-01d/gpt-oss-120b/2026-1113-004452-1794552292-275033-14249-pipeline"
+G02_PIPELINE="$ROOT/results/g-02/gpt-oss-120b/2026-1113-123203-1794594723-285189-27336-pipeline"
+G03B_RUN="$ROOT/results/g-03/gpt-oss-120b/2026-1113-221148-1794629508-303275-31812-g03b-curriculum"
+G03C_PIPELINE="$ROOT/results/g-03/gpt-oss-120b/2026-1113-231629-1794633389-8509-12360-g03c-pipeline"
+M1_SHA256="0c9d913781a8a06342fef64113bfbb2ccd2d9d7dddd2b41d760915dbf8018cbf"
+M2_SHA256="057a2a9e544934d4deec3ada98b05b3f7d4a3aa5e7dc2f39f444aaa7fdfcd858"
+M3_SHA256="42defe62b711a331ebe0c6a27480c4547422523dcadf6e92acba09ec9d970a15"
+G03B_ORDER_SHA256="9e8ad5fdaaa1729aed4d75afe5911b5f617b2b6882b7a0d338c745e0c9d54766"
+G03B_MANIFEST_SHA256="2182dce2a86821a02c2b989586737c022d4a9dd0363b8d2454921cccfd2c4f5c"
+G02_TRAIN_SHA256="546142986ff39e08ccf38db6b6c12284c200f5bf20775c1b0b97f1a34fb63eeb"
+G02_VAL_SHA256="cf78092416d3ca8d039daf5c722490ec60d419232d17cc7a812f6a125d5b686c"
+G02_FINGERPRINT="262ef043bf069025f0db78f5d13b62af5082ec31a0d4662564c730ebcd374d03"
+G02_PREPARED_MANIFEST_SHA256="61968384ce8855105a08658029c4e27825faf53d3fa93bb4211b3bca7438d292"
+TRAIN_PAIRS=19464
+OPTIMIZER_STEPS=811
+GLOBAL_BATCH=24
+CHECKPOINT_STEPS="100,200,300,400,500,600,700,800,811"
+PHASE_NAMES="Foundation,Adaptation,Specialization"
+PHASE_STEPS="270,270,271"
+PHASE_SOURCE="5184,4016,2800"
+PHASE_TARGET="1296,2464,3704"
+M3_STATUS="G03C_V4_M3_CURRICULUM_TRAINING_COMPLETE_RESEARCH_PENDING_REVIEW"
+M3_ADAPTER_STATUS="G03C_V4_M3_ADAPTER_COMPLETE"
+M3_VERIFY_STATUS="G03C_V4_INDEPENDENT_FULL_M3_VERIFY_PASS"
+M3_TRAIN_ORDER="G03B_V1_VERIFIED_THREE_PHASE_CURRICULUM"
+M2_STATUS="G02_V2_M2_STANDARD_MIXED_TRAINING_COMPLETE"
+M2_TRAIN_ORDER="STANDARD_MIXED_FROZEN_SEEDED_SHUFFLE_ONCE"
+M1_STATUS="G01D_V4_M1_SOURCE_ONLY_TRAINING_COMPLETE"
+M1_ADAPTER_STATUS="G01D_V4_M1_ADAPTER_COMPLETE"
+CHECKPOINT_STATUS="G03C_V4_CURRICULUM_CHECKPOINT_COMPLETE"
+LOG_DIR="$ROOT/logs/g-03/gpt-oss-120b"
+LOG_PREFIX="g-03d-v1"
+LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
+RESULTS_DIR="$ROOT/results/g-03/gpt-oss-120b"
+mkdir -p "$LOG_DIR" "$RESULTS_DIR"
+STAMP="$(TZ=America/Chicago date "$LOG_TIMESTAMP_FORMAT")"
+RUN_ID="${STAMP}-$(date +%s)-$$-${RANDOM}"
+RUN="$RESULTS_DIR/$RUN_ID-g03d-verify"
+LOG_FILE="$LOG_DIR/$LOG_PREFIX-verify-$RUN_ID.log"
+[[ ! -e "$RUN" && ! -e "$LOG_FILE" ]] || { echo 'REFUSE_OVERWRITE_EXISTING_RUN' >&2; exit 2; }
+( set -C; : > "$LOG_FILE" )
+exec > >(tee -a "$LOG_FILE") 2>&1
+chicago() { TZ=America/Chicago date '+%Y-%m-%dT%H:%M:%S%:z'; }
+START_EPOCH="$(date +%s)"
+echo "[G-03d v1] START MODE=$MODE CHICAGO=$(chicago) RUN=$RUN LOG=$LOG_FILE"
+echo "[G-03d v1] MODEL=$MODEL_ID REVISION=$MODEL_REVISION M1_SHA256=$M1_SHA256 M2_SHA256=$M2_SHA256 M3_SHA256=$M3_SHA256"
+echo "[G-03d v1] EXPECTED_PAIRS=$TRAIN_PAIRS EXPECTED_STEPS=$OPTIMIZER_STEPS G03B_ORDER_SHA256=$G03B_ORDER_SHA256"
+ARGS=(
+ --g03c-pipeline "$G03C_PIPELINE" --g03b-run "$G03B_RUN"
+ --g02-pipeline "$G02_PIPELINE" --m1-pipeline "$M1_PIPELINE"
+ --output-dir "$RUN" --log-file "$LOG_FILE"
+ --model-id "$MODEL_ID" --revision "$MODEL_REVISION"
+ --m1-sha256 "$M1_SHA256" --m2-sha256 "$M2_SHA256" --m3-sha256 "$M3_SHA256"
+ --g03b-order-sha256 "$G03B_ORDER_SHA256" --g03b-manifest-sha256 "$G03B_MANIFEST_SHA256"
+ --g02-train-sha256 "$G02_TRAIN_SHA256" --g02-validation-sha256 "$G02_VAL_SHA256"
+ --g02-fingerprint "$G02_FINGERPRINT"
+ --g02-prepared-manifest-sha256 "$G02_PREPARED_MANIFEST_SHA256"
+ --phase-names "$PHASE_NAMES" --phase-steps "$PHASE_STEPS"
+ --phase-source "$PHASE_SOURCE" --phase-target "$PHASE_TARGET"
+ --expected-g03c-verify-status "$M3_VERIFY_STATUS" --expected-m3-status "$M3_STATUS"
+ --expected-m3-adapter-status "$M3_ADAPTER_STATUS" --expected-m3-order "$M3_TRAIN_ORDER"
+ --expected-m2-status "$M2_STATUS" --expected-m2-order "$M2_TRAIN_ORDER"
+ --expected-m1-status "$M1_STATUS" --expected-m1-adapter-status "$M1_ADAPTER_STATUS"
+ --expected-checkpoint-status "$CHECKPOINT_STATUS"
+ --pairs "$TRAIN_PAIRS" --steps "$OPTIMIZER_STEPS" --batch "$GLOBAL_BATCH"
+ --checkpoint-steps "$CHECKPOINT_STEPS"
+)
+STEP_START="$(date +%s)"
+echo "[G-03d v1] STEP=READ_ONLY_INDEPENDENT_M3_VERIFY START CHICAGO=$(chicago)"
+if "$PYTHON_BIN" -u "$ENGINE" "${ARGS[@]}"; then
+  echo "[G-03d v1] STEP=READ_ONLY_INDEPENDENT_M3_VERIFY PASS EXIT=0 ELAPSED_SECONDS=$(($(date +%s)-STEP_START)) CHICAGO=$(chicago)"
+  echo "[G-03d v1] FINAL_STATUS=PASS EXIT=0 ELAPSED_SECONDS=$(($(date +%s)-START_EPOCH)) RUN=$RUN LOG=$LOG_FILE"
+else
+  RC=$?
+  echo "[G-03d v1] STEP=READ_ONLY_INDEPENDENT_M3_VERIFY FAIL EXIT=$RC ELAPSED_SECONDS=$(($(date +%s)-STEP_START)) CHICAGO=$(chicago)"
+  echo "[G-03d v1] FINAL_STATUS=FAIL EXIT=$RC ELAPSED_SECONDS=$(($(date +%s)-START_EPOCH)) RUN=$RUN LOG=$LOG_FILE"
+  exit "$RC"
+fi
