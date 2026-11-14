@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G-03c v1: audited GPT-OSS-120B M3 curriculum; M1 -> M3 independent branch.
+"""G-03c v3: audited GPT-OSS-120B M3 curriculum; M1 -> M3 independent branch.
 
 This controller vendors the exact completed G-02 v2 MXFP4 training kernel as a
 separate, hash-pinned Python module. No G-02 wrapper or M2 adapter is invoked.
@@ -17,11 +17,11 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-VERSION = 'v1'
+VERSION = 'v3'
 DOMAINS = ('java_source', 'java_mixed', 'python_mixed')
 G03B_STATUS = 'G03B_V1_CURRICULUM_PREPARED_AUDIT_PASS_NOT_TRAINED'
-AUDIT_STATUS = 'G03C_V1_CPU_CURRICULUM_AUDIT_PASS_NOT_TRAINED'
-TRAIN_STATUS = 'G03C_V1_M3_CURRICULUM_TRAINING_COMPLETE_RESEARCH_PENDING_REVIEW'
+AUDIT_STATUS = 'G03C_V3_CPU_CURRICULUM_AUDIT_PASS_NOT_TRAINED'
+TRAIN_STATUS = 'G03C_V3_M3_CURRICULUM_TRAINING_COMPLETE_RESEARCH_PENDING_REVIEW'
 
 
 def require(ok, message):
@@ -58,6 +58,20 @@ def records(path):
         for i, line in enumerate(f, 1):
             require(bool(line.strip()), 'BLANK_JSONL_ROW '+str(path)+':'+str(i))
             yield json.loads(line)
+
+
+def raw_row_sha256(path):
+    """Reproduce G-03a/G-03b raw-JSONL row hashing exactly, not parsed-object hashing.
+
+    G-03b hashes the bytes of each original JSONL line after stripping CR/LF.
+    Its F-01c source_row_sha256 and G-02 g02_row_sha256 are raw-byte
+    identities; they are NOT interchangeable with canonical JSON digests.
+    """
+    with Path(path).open('rb') as source:
+        for lineno, line in enumerate(source, 1):
+            require(line.strip() and line.endswith(b'\n'),
+                    'INVALID_FROZEN_JSONL_LINE '+str(path)+':'+str(lineno))
+            yield hashlib.sha256(line.rstrip(b'\r\n')).hexdigest()
 
 
 def write_new(path, x):
@@ -253,8 +267,15 @@ def verify_input_order(c, a, core):
                 cm['phase_plan'][i]['java_mixed']+cm['phase_plan'][i]['python_mixed']==c.phase_target[i]
                 for i in range(3)), 'G03B_SHELL_PHASE_POLICY_MISMATCH')
     rows=list(records(gprep/'train.jsonl'))
+    g02_raw_hashes=list(raw_row_sha256(gprep/'train.jsonl'))
+    # F-01c raw source rows and their canonical JSON digests are intentionally distinct.
+    # G-03a/G-03b recorded both identities independently.
+    frozen_path=a.frozen_prepared/'train.jsonl'
+    f01c_raw_hashes=list(raw_row_sha256(frozen_path))
+    frozen_rows=list(records(frozen_path))
     order=list(records(g03b/'curriculum_order.jsonl'))
-    require(len(rows)==len(order)==c.train_pairs, 'INPUT_PAIR_COUNT_MISMATCH')
+    require(len(rows)==len(order)==len(g02_raw_hashes)==len(f01c_raw_hashes)==
+            len(frozen_rows)==c.train_pairs, 'INPUT_PAIR_COUNT_MISMATCH')
     scores=list(records(c.g03a_run/'verified_scores.jsonl'))
     require(len(scores)==c.train_pairs, 'SCORED_PAIR_COUNT_MISMATCH')
     # G03a scores are indexed by their original G02 prepared row order.
@@ -273,11 +294,18 @@ def verify_input_order(c, a, core):
                 item['optimizer_step']==position//c.global_batch+1 and
                 item['microbatch_index']==position%c.global_batch,
                 'CURRICULUM_STEP_POSITION_DRIFT')
-        require(item['g02_row_sha256']==hash_json(row) and
-                item['source_row_sha256']==row['original_row_sha256'] and
+        # Three distinct hashes: G-02 raw bytes; F-01c raw bytes;
+        # and F-01c canonical JSON (embedded in G-02 original_row_sha256).
+        # Never compare source_row_sha256 with original_row_sha256 directly.
+        original=frozen_rows[idx]
+        require(item['g02_row_sha256']==g02_raw_hashes[idx]==sr['g02_row_sha256'] and
+                item['source_row_sha256']==f01c_raw_hashes[idx]==sr['source_row_sha256'] and
+                row['original_row_sha256']==hash_json(original)==sr['g02_original_row_sha256'] and
+                (row['corpus'],str(row['id1']),str(row['id2']),row['label'])==
+                (original['corpus'],str(original['id1']),str(original['id2']),original['label']) and
                 item['corpus']==row['corpus']==sr['corpus'] and
                 item['label']==row['label']==sr['label'],
-                'CURRICULUM_ROW_DATA_IDENTITY_DRIFT')
+                'CURRICULUM_ROW_DATA_IDENTITY_DRIFT row_index='+str(idx))
         require(item['imputed_proxy']==sr['imputed_proxy'] and
                 math.isclose(item['reduced_4d_score'],sr['reduced_4d_score'],rel_tol=0,abs_tol=1e-12),
                 'CURRICULUM_DIFFICULTY_SCORE_DRIFT')
@@ -362,7 +390,7 @@ def run_smoke(c,a,core):
     if c.stage=='stability':
         core.verify_stages(a,prepared_hash)
     core.smoke(a,tok,rows,codes,prepared_hash)
-    proof={'version':VERSION,'status':'G03C_V1_'+c.stage.upper()+'_PASS_REUSING_PINNED_G02_KERNEL',
+    proof={'version':VERSION,'status':'G03C_V3_'+c.stage.upper()+'_PASS_REUSING_PINNED_G02_KERNEL',
            'at_chicago':chicago(),'g03b_order_sha256':c.g03b_order_sha256,
            'm1_initial_adapter_sha256':c.m1_adapter_sha256,
            'core_runtime_status':'G02_V2_'+c.stage.upper()+'_PASS_NOT_M2_TRAINING',
@@ -379,7 +407,7 @@ def require_smoke_proofs(c,a,core):
     for stage,d in (('stress',c.stress_run),('stability',c.stability_run)):
         require(d is not None,'MISSING_'+stage.upper()+'_PROOF')
         proof=load(d/'g03c_stage_proof.json')
-        require(proof['status']=='G03C_V1_'+stage.upper()+'_PASS_REUSING_PINNED_G02_KERNEL' and
+        require(proof['status']=='G03C_V3_'+stage.upper()+'_PASS_REUSING_PINNED_G02_KERNEL' and
                 proof['g03b_order_sha256']==c.g03b_order_sha256 and
                 proof['m1_initial_adapter_sha256']==c.m1_adapter_sha256 and
                 proof['g02_kernel_run_manifest_sha256']==sha(d/'run_manifest.json'),
@@ -404,7 +432,7 @@ def m3_checkpoint(c,a,core,model,opt,tok,step,ledger_digest):
         'consumed_prefix_row_index_sha256':ledger_digest},dest/'optimizer_state.pt')
     files={str(p.relative_to(dest)):sha(p) for p in dest.rglob('*') if p.is_file()}
     require('optimizer_state.pt' in files,'EMPTY_M3_CHECKPOINT')
-    meta={'version':VERSION,'status':'G03C_V1_CURRICULUM_CHECKPOINT_COMPLETE',
+    meta={'version':VERSION,'status':'G03C_V3_CURRICULUM_CHECKPOINT_COMPLETE',
           'at_chicago':chicago(),'optimizer_step':step,
           'g02_fingerprint':core.fingerprint(a),
           'prepared_manifest_sha256':c.g02_prepared_manifest_sha256,
@@ -422,7 +450,7 @@ def m3_checkpoint(c,a,core,model,opt,tok,step,ledger_digest):
 def run_train(c,a,core):
     import torch
     verify_prior_audit(c,c.audit_run,a,core)
-    _,_,order,expected_hashes=verify_input_order(c,a,core)
+    _,verified_frozen_rows,order,expected_hashes=verify_input_order(c,a,core)
     require_smoke_proofs(c,a,core)
     tok,rows,codes,_=load_gpu_context(c,a,core)
     # Explicitly load from FROZEN M1. Stress/stability adapters must never initialize full M3.
@@ -434,6 +462,13 @@ def run_train(c,a,core):
                           weight_decay=a.weight_decay)
     id_to_idx={id(row):idx for idx,row in enumerate(rows['train'])}
     require(len(id_to_idx)==len(rows['train']),'DUPLICATED_PYTHON_ROW_OBJECTS')
+    # Actual model feeds may contain an injected token cache, but all serialized
+    # G-02 row fields must remain identical to the CPU-audited frozen records.
+    require(len(verified_frozen_rows)==len(rows['train']), 'MODEL_INPUT_COUNT_DRIFT')
+    frozen_semantic_hashes=[hash_json(row) for row in verified_frozen_rows]
+    require(all(hash_json(row_without_cache(row))==frozen_semantic_hashes[idx]
+                for idx,row in enumerate(rows['train'])),
+            'MODEL_INPUT_FROZEN_ROW_DRIFT')
     fed=[]; expected_all=[x['row_index'] for x in order]
     actual_step_hashes=[];last=None;vals=[];ckpts=[]
     original=core.sample_tensors
@@ -444,7 +479,7 @@ def run_train(c,a,core):
             idx=id_to_idx[id(row)]
             require(len(fed)<len(expected_all) and idx==expected_all[len(fed)],
                     'ACTUAL_MICROBATCH_ORDER_MISMATCH pos='+str(len(fed)))
-            require(hash_json(row_without_cache(row))==order[len(fed)]['g02_row_sha256'],
+            require(hash_json(row_without_cache(row))==frozen_semantic_hashes[idx],
                     'ACTUAL_MICROBATCH_ROW_SHA_MISMATCH')
             fed.append(idx)
         return original(args,tokens,row,code_map,device)
@@ -509,7 +544,7 @@ def run_train(c,a,core):
     files={str(p.relative_to(final)):sha(p) for p in final.rglob('*') if p.is_file()}
     require('adapter_model.safetensors' in files,'M3_FINAL_ADAPTER_MISSING')
     write_new(a.run_dir/'adapter_manifest.json',{
-        'version':VERSION,'status':'G03C_V1_M3_ADAPTER_COMPLETE',
+        'version':VERSION,'status':'G03C_V3_M3_ADAPTER_COMPLETE',
         'adapter_files_sha256':files,'initial_m1_adapter_sha256':c.m1_adapter_sha256,
         'g03b_order_sha256':c.g03b_order_sha256,'optimizer_steps':c.optimizer_steps,
         'consumption_ledger_sha256':sha(ledger),'at_chicago':chicago()})
@@ -572,7 +607,7 @@ def verify_training(c,a,core):
     m=load(c.train_run/'g03c_train_manifest.json')
     am=load(c.train_run/'adapter_manifest.json')
     require(s.get('status')==TRAIN_STATUS and m.get('status')==TRAIN_STATUS and
-            am.get('status')=='G03C_V1_M3_ADAPTER_COMPLETE',
+            am.get('status')=='G03C_V3_M3_ADAPTER_COMPLETE',
             'M3_TRAINING_STATUS_INCOMPLETE')
     require(s['g03b_order_sha256']==c.g03b_order_sha256 and
             s['initial_m1_adapter_sha256']==c.m1_adapter_sha256 and
@@ -610,7 +645,7 @@ def verify_training(c,a,core):
     for folder in sorted((c.train_run/'checkpoints').glob('step-*')):
         meta=load(folder/'checkpoint_manifest.json')
         step=meta['optimizer_step']
-        require(meta['status']=='G03C_V1_CURRICULUM_CHECKPOINT_COMPLETE' and
+        require(meta['status']=='G03C_V3_CURRICULUM_CHECKPOINT_COMPLETE' and
                 meta['g03b_curriculum_order_sha256']==c.g03b_order_sha256 and
                 meta['g03c_experiment_fingerprint']==experiment_fingerprint(c,a,core) and
                 meta['initial_m1_adapter_sha256']==c.m1_adapter_sha256 and
@@ -623,7 +658,7 @@ def verify_training(c,a,core):
         ckpts.append(step)
     require(ckpts and ckpts[-1]==c.optimizer_steps,
             'FINAL_M3_CHECKPOINT_NOT_VERIFIED')
-    out={'version':VERSION,'status':'G03C_V1_INDEPENDENT_FULL_M3_VERIFY_PASS',
+    out={'version':VERSION,'status':'G03C_V3_INDEPENDENT_FULL_M3_VERIFY_PASS',
          'run':str(c.train_run),'steps':c.optimizer_steps,'pairs':c.train_pairs,
          'curriculum_order_sha256':c.g03b_order_sha256,
          'adapter_model_sha256':am['adapter_files_sha256']['adapter_model.safetensors'],

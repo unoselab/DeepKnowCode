@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# G-03c v1. Independent M3 curriculum from the SAME G01d M1 adapter as G02 M2.
+# G-03c v3. Independent M3 curriculum from the SAME G01d M1 adapter as G02 M2.
 # Frozen G02 data, G03a scores, G03b exact 811x24 order. No other shell wrapper invoked.
 # GPU training is exploratory and requires explicit --train-research invocation.
 set -Eeuo pipefail
@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN="python"
 PYFILE="$ROOT/src/py2/g-03c-train-curriculum-lora.py"
 ENGINE="$ROOT/src/py2/g-03c-training-kernel.py"
-VERSION="v1"
+VERSION="v3"
 CORE_VERSION="v2"
 CONDA_ENV="deepknowcode-gptoss"
 MODEL_ID="openai/gpt-oss-120b"
@@ -143,7 +143,7 @@ PYTHON_VAL_COUNT=40
 # Logging: Chicago, unique, stdout+stderr captured via tee, no overwrites.
 LOG_DIR="$ROOT/logs/g-03/gpt-oss-120b"
 RESULTS_DIR="$ROOT/results/g-03/gpt-oss-120b"
-LOG_PREFIX="g-03c-v1"
+LOG_PREFIX="g-03c-v3"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 LOG_TEE_OPTIONS='-a'
 LOG_CAPTURE_STDOUT="true"
@@ -275,9 +275,30 @@ build_args() {
 
 controller() {
   local stage="$1" core_mode="prepare"
+  # Stage-specific G-02 compatibility inputs MUST NOT mutate caller state.
+  # v2 cleared the global PREPARED_RUN during audit; stress then received "".
+  # Keep these shell-owned values explicit for every stage (also for stand-alone verify).
+  local PREPARED_RUN='' STRESS_RUN='' STABILITY_RUN=''
   case "$stage" in
-    stress|stability|train) core_mode="$stage" ;;
-    audit|verify) core_mode='prepare'; PREPARED_RUN=''; STRESS_RUN=''; STABILITY_RUN='';;
+    audit|verify)
+      core_mode='prepare'
+      ;;
+    stress)
+      core_mode='stress'
+      PREPARED_RUN="$G02_PIPELINE/00-prepare"
+      ;;
+    stability)
+      core_mode='stability'
+      PREPARED_RUN="$G02_PIPELINE/00-prepare"
+      STRESS_RUN="$PIPELINE/01-stress"
+      ;;
+    train)
+      core_mode='train'
+      PREPARED_RUN="$G02_PIPELINE/00-prepare"
+      STRESS_RUN="$PIPELINE/01-stress"
+      STABILITY_RUN="$PIPELINE/02-stability"
+      ;;
+    *) echo "Unsupported stage: $stage" >&2; return 2 ;;
   esac
   build_args
   "$PYTHON_BIN" -u "$PYFILE" "$stage" \
@@ -318,8 +339,8 @@ run_stage() {
   local proof=''
   case "$name" in
     audit) proof='audit_manifest.json'; AUDIT_RUN="$RUN_DIR" ;;
-    stress) proof='g03c_stage_proof.json'; STRESS_RUN="$RUN_DIR" ;;
-    stability) proof='g03c_stage_proof.json'; STABILITY_RUN="$RUN_DIR" ;;
+    stress) proof='g03c_stage_proof.json' ;;
+    stability) proof='g03c_stage_proof.json' ;;
     train) proof='g03c_train_manifest.json'; TRAIN_RUN="$RUN_DIR" ;;
   esac
   [[ -n "$proof" && -s "$RUN_DIR/$proof" ]] || {
@@ -333,7 +354,6 @@ printf '[G-03c %s] G03B_ORDER_SHA256=%s M1_SHA256=%s G02_FROZEN_SHA256=%s\n' \
 printf '[G-03c %s] RESEARCH_ACKNOWLEDGED=%s TRAINING_APPROVED=%s LABEL_REVIEW=%s\n' \
    "$VERSION" "$RESEARCH_ACKNOWLEDGED" "$TRAINING_APPROVED" "$MANUAL_LABEL_REVIEW_STATUS"
 if [[ "$MODE" == '--audit' ]]; then
-  PREPARED_RUN=''
   run_stage audit 00
 elif [[ "$MODE" == '--train-research' ]]; then
   # Research mode never changes independent review approval status.
@@ -343,13 +363,11 @@ elif [[ "$MODE" == '--train-research' ]]; then
   run_stage train 03
   RUN_DIR="$PIPELINE/04-verify"
   mkdir "$RUN_DIR"
-  PREPARED_RUN=''
   step verify controller verify
   [[ -s "$RUN_DIR/verification_result.json" ]] || { echo 'M3 independent verification proof missing' >&2; exit 4; }
 elif [[ "$MODE" == '--verify' ]]; then
   [[ -d "$VERIFY_SOURCE/03-train" ]] || { echo 'Missing previous M3 train stage' >&2; exit 2; }
   TRAIN_RUN="$(cd "$VERIFY_SOURCE/03-train" && pwd -P)"
-  PREPARED_RUN=''
   RUN_DIR="$PIPELINE/00-verify"
   mkdir "$RUN_DIR"
   step verify controller verify
