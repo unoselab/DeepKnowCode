@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""I-01c v2: Gemma 4 BF16 source-only LoRA with immutable I-01b input and staged proof.
+"""I-01c v3: Gemma 4 BF16 source-only LoRA with immutable I-01b input and staged proof.
 
 No experiment-specific value is defaulted here. Shell passes ALL configuration by CLI.
 Preflight is read-only on source/model; modes create only unique run directories.
@@ -100,7 +100,9 @@ gradient_checkpoint_use_reentrant prepared_run prepared_manifest_sha256 prepared
 prepared_validation_sha256 prepared_order_sha256 expected_prepared_fingerprint
 prepared_verify_report_status prepared_verification_sha256 prepared_provenance_sha256
 i01a_run i01a_preflight_sha256 i01a_tokenizer_sha256 i01a_lora_sha256
-i01a_weights_sha256 expected_engine_sha256 source_codes frozen_train_sha256 frozen_validation_sha256
+i01a_weights_sha256 expected_engine_sha256 legacy_v2_engine_sha256
+legacy_v2_log_prefix legacy_v2_fingerprint legacy_v2_stress_report_sha256
+legacy_v2_stability_report_sha256 source_codes frozen_train_sha256 frozen_validation_sha256
 frozen_manifest_sha256 answer_yes answer_no system_text user_prefix user_separator
 user_suffix optimizer learning_rate weight_decay max_grad_norm lr_scheduler
 stability_balanced_labels save_optimizer_state log_dir log_prefix log_timestamp_format
@@ -115,6 +117,12 @@ per_device_batch_size gradient_accumulation_steps max_steps expected_epochs warm
 stress_steps stress_min_tokens stability_steps log_steps progress_microbatch_every
 eval_steps eval_batch_size save_steps'''.split()
 DYNAMIC_FIELDS = {'mode', 'run_dir', 'log_file', 'stress_run', 'stability_run', 'resume_checkpoint'}
+# These v3 compatibility pins are supplied explicitly by Shell. They never
+# become implicit v2 experiment settings when rebuilding its fingerprint.
+LEGACY_V3_FIELDS = {'legacy_v2_engine_sha256', 'legacy_v2_log_prefix',
+                    'legacy_v2_fingerprint', 'legacy_v2_stress_report_sha256',
+                    'legacy_v2_stability_report_sha256'}
+
 
 
 def parse(argv=None):
@@ -157,9 +165,39 @@ def fingerprint(a):
     return sha_text(canonical(stable_config(a)))
 
 
+def legacy_v2_fingerprint(a):
+    """Rebuild immutable v2 fingerprint from v3 Shell-provided v2 settings.
+
+    This has no effect on the v3 training fingerprint; only proves exact
+    compatibility with completed v2 Stress/Stability evidence.
+    """
+    old = {k:v for k,v in stable_config(a).items() if k not in LEGACY_V3_FIELDS}
+    old['version'] = 'v2'
+    old['expected_engine_sha256'] = a.legacy_v2_engine_sha256
+    old['log_prefix'] = a.legacy_v2_log_prefix
+    return sha_text(canonical(old))
+
+
+def proof_version(a, folder):
+    """Only completed v2 or current v3 stage runs may serve as proofs."""
+    recorded = load_json(Path(folder)/'run_manifest.json').get('version')
+    need(recorded in ('v2', a.version), f'UNSUPPORTED_STAGE_PROOF_VERSION:{recorded}')
+    return recorded
+
+
+def proof_fingerprint(a, version):
+    if version == 'v2':
+        observed = legacy_v2_fingerprint(a)
+        need(observed == a.legacy_v2_fingerprint,
+             f'LEGACY_V2_SHELL_FINGERPRINT_MISMATCH:{observed}')
+        return observed
+    need(version == a.version, f'UNSUPPORTED_CHECKPOINT_VERSION:{version}')
+    return fingerprint(a)
+
+
 def validate_config(a):
     need(a.mode in ('--stress', '--stability', '--train', '--resume'), 'MODE_INVALID')
-    need(a.version == 'v2' and a.experiment == 'i-01c', 'EXPERIMENT_OR_VERSION_DRIFT')
+    need(a.version == 'v3' and a.experiment == 'i-01c', 'EXPERIMENT_OR_VERSION_DRIFT')
     need(a.base_precision == 'bf16' and a.finetuning_method == 'lora' and
          a.quantization == 'none', 'QLORA_OR_UNAPPROVED_PRECISION_FORBIDDEN')
     need(a.model_auto_class == 'AutoModelForMultimodalLM', 'GEMMA_MODEL_CLASS_DRIFT')
@@ -203,10 +241,13 @@ def validate_config(a):
                 'expected_prepared_fingerprint', 'prepared_verification_sha256',
                 'prepared_provenance_sha256', 'i01a_preflight_sha256',
                 'i01a_tokenizer_sha256', 'i01a_lora_sha256', 'i01a_weights_sha256',
-                'expected_engine_sha256', 'frozen_train_sha256',
+                'expected_engine_sha256', 'legacy_v2_engine_sha256',
+                'legacy_v2_fingerprint', 'legacy_v2_stress_report_sha256',
+                'legacy_v2_stability_report_sha256', 'frozen_train_sha256',
                 'frozen_validation_sha256', 'frozen_manifest_sha256'):
         need(re.fullmatch('[0-9a-f]{64}', getattr(a, key)) is not None,
              f'INVALID_SHA256_PIN:{key}')
+    need(bool(a.legacy_v2_log_prefix.strip()), 'LEGACY_V2_LOG_PREFIX_MISSING')
     need(a.root.is_dir() and a.run_dir.is_dir() and a.log_dir.is_dir(),
          'REQUIRED_RUNTIME_DIRECTORY_MISSING')
     need(a.prepared_run != a.run_dir, 'INPUT_RUN_WOULD_BE_OVERWRITTEN')
@@ -365,6 +406,8 @@ def verify_hardware(a):
 
 def preflight(a):
     file_pin(Path(__file__),a.expected_engine_sha256,'I01C_ENGINE')
+    need(legacy_v2_fingerprint(a)==a.legacy_v2_fingerprint,
+         'LEGACY_V2_FINGERPRINT_DOES_NOT_MATCH_CURRENT_TRAINING_CONFIG')
     need(a.prepared_run.exists(), 'PREPARED_RUN_MISSING')
     prepared=verify_prepared(a)
     snapshot = {name:snapshot_pin(a.snapshot/name,digest,name) for name,digest in (
@@ -379,12 +422,12 @@ def preflight(a):
          and token['pinned_chat_template_sha256']==a.chat_template_sha256,
          'PREPARED_TOKENIZER_IDENTITY_DRIFT')
     if a.mode in ('--stability', '--train', '--resume'):
-        verify_stage_run(a, a.stress_run, 'stress', 'I01C_V2_STRESS_PASS_NOT_M1_TRAINING')
+        verify_stage_run(a, a.stress_run, 'stress')
     if a.mode in ('--train', '--resume'):
-        verify_stage_run(a, a.stability_run, 'stability', 'I01C_V2_STABILITY_PASS_NOT_M1_TRAINING')
+        verify_stage_run(a, a.stability_run, 'stability')
     if a.mode == '--resume':
         verify_checkpoint(a, a.resume_checkpoint, require_training=True)
-    evidence={'version':a.version,'status':'I01C_V2_PREFLIGHT_PASS_NOT_TRAINED',
+    evidence={'version':a.version,'status':'I01C_V3_PREFLIGHT_PASS_NOT_TRAINED',
               'at_chicago':now(),'config_fingerprint':fingerprint(a),
               'effective_parameters':config(a),'source':prepared,
               'snapshot':snapshot,'environment':hardware,
@@ -542,7 +585,7 @@ def get_training_inputs(a, phase):
     tok,template=load_tokenizer(a)
     tokens={part:tokenize_samples(a,tok,template,rows[part],codes,indices[part],part)
             for part in ('train','validation')}
-    report={'version':a.version,'status':'I01C_V2_TOKEN_AUDIT_PASS',
+    report={'version':a.version,'status':'I01C_V3_TOKEN_AUDIT_PASS',
             'at_chicago':now(),'prepared_manifest_sha256':a.prepared_manifest_sha256,
             'config_fingerprint':fingerprint(a),'phase':phase,
             'tokenized_sample_counts':{k:len(v) for k,v in tokens.items()},
@@ -733,7 +776,7 @@ def checkpoint(a,model,opt,step,phase):
     files={str(p.relative_to(tmp)):sha_file(p) for p in sorted(tmp.rglob('*')) if p.is_file()}
     need('optimizer_state.pt' in files and any(k.endswith('.safetensors') for k in files),
          'CHECKPOINT_ADAPTER_OR_OPTIMIZER_MISSING')
-    manifest={'version':a.version,'status':'I01C_V2_CHECKPOINT_COMPLETE',
+    manifest={'version':a.version,'status':'I01C_V3_CHECKPOINT_COMPLETE',
               'at_chicago':now(),'phase':phase,'optimizer_step':step,
               'config_fingerprint':fingerprint(a),
               'prepared_manifest_sha256':a.prepared_manifest_sha256,
@@ -747,14 +790,18 @@ def checkpoint(a,model,opt,step,phase):
     return result
 
 
-def verify_checkpoint(a,folder,require_training=False):
+def verify_checkpoint(a,folder,require_training=False,proof_version_override=None):
     import torch
     folder=Path(folder)
     meta_path=folder/'checkpoint_manifest.json'
     need(meta_path.is_file(),'CHECKPOINT_MANIFEST_MISSING')
     meta=load_json(meta_path)
-    need(meta.get('status')=='I01C_V2_CHECKPOINT_COMPLETE' and
-         meta.get('config_fingerprint')==fingerprint(a) and
+    version = proof_version_override or a.version
+    expected_fingerprint = proof_fingerprint(a, version)
+    expected_status = f'I01C_{version.upper()}_CHECKPOINT_COMPLETE'
+    need(meta.get('version')==version and
+         meta.get('status')==expected_status and
+         meta.get('config_fingerprint')==expected_fingerprint and
          meta.get('prepared_manifest_sha256')==a.prepared_manifest_sha256 and
          meta.get('model_revision')==a.model_revision,
          'CHECKPOINT_LINEAGE_OR_STATUS_MISMATCH')
@@ -766,10 +813,11 @@ def verify_checkpoint(a,folder,require_training=False):
         file_pin(folder/name,digest,'CHECKPOINT_'+name)
     state=torch.load(folder/'optimizer_state.pt',map_location='cpu',weights_only=True)
     need(state.get('optimizer_step')==meta['optimizer_step'] and
-         state.get('config_fingerprint')==fingerprint(a) and
+         state.get('config_fingerprint')==expected_fingerprint and
          state.get('prepared_manifest_sha256')==a.prepared_manifest_sha256,
          'CHECKPOINT_OPTIMIZER_STATE_DRIFT')
     if require_training:
+        need(version==a.version, 'RESUME_CANNOT_REUSE_LEGACY_V2_CHECKPOINT')
         need(meta['phase']=='train' and 0<meta['optimizer_step']<a.max_steps and
              meta['optimizer_step']%a.save_steps==0,
              'RESUME_REQUIRES_INTERMEDIATE_M1_TRAIN_CHECKPOINT')
@@ -817,15 +865,32 @@ def write_stage_report(a,kind,status,history,checkpoints,extra):
     return report
 
 
-def verify_stage_run(a,folder,kind,status):
+def verify_stage_run(a, folder, kind):
+    """Validate v2 pinned stage proofs or v3-native proofs, fail closed.
+
+    Legacy v2 stage reports are pinned by SHA256 from actual server evidence,
+    and all checkpoint artifacts are rehashed on the server before training.
+    """
     folder=Path(folder)
     need(folder.is_dir() and folder!=a.run_dir,f'STAGE_RUN_MISSING:{kind}')
     manifest=load_json(folder/'run_manifest.json')
+    version=proof_version(a, folder)
+    expected_status=f'I01C_{version.upper()}_{kind.upper()}_PASS_NOT_M1_TRAINING'
+    if version=='v2':
+        pinned = (a.legacy_v2_stress_report_sha256 if kind=='stress'
+                  else a.legacy_v2_stability_report_sha256)
+        file_pin(folder/'stage_report.json',pinned,f'LEGACY_V2_{kind.upper()}_REPORT')
     report=load_json(folder/'stage_report.json')
-    need(manifest.get('final_status')=='PASS' and manifest.get('status')==status and
-         report.get('status')==status and report.get('kind')==kind,
+    fp=proof_fingerprint(a,version)
+    need(manifest.get('version')==version and
+         report.get('version')==version and
+         manifest.get('final_status')=='PASS' and
+         manifest.get('exit_code')==0 and
+         manifest.get('status')==expected_status and
+         report.get('status')==expected_status and report.get('kind')==kind,
          f'STAGE_PROOF_STATUS_MISMATCH:{kind}')
-    need(report['config_fingerprint']==fingerprint(a) and
+    need(manifest.get('config_fingerprint')==fp and
+         report['config_fingerprint']==fp and
          report['prepared_manifest_sha256']==a.prepared_manifest_sha256 and
          report['model_revision']==a.model_revision,
          f'STAGE_CONFIG_OR_SOURCE_DRIFT:{kind}')
@@ -852,12 +917,12 @@ def verify_stage_run(a,folder,kind,status):
         need(cp.is_relative_to(folder/'checkpoints'), 'STAGE_CHECKPOINT_OUTSIDE_STAGE_RUN')
         need(sha_file(cp/'checkpoint_manifest.json')==ck['checkpoint_manifest_sha256'],
              'STAGE_CHECKPOINT_MANIFEST_SHA_CHANGED')
-        verify_checkpoint(a,cp)
-    return {'run':str(folder),'kind':kind,'status':status,
+        verify_checkpoint(a,cp,proof_version_override=version)
+    return {'run':str(folder),'kind':kind,'status':expected_status,
+            'proof_version':version,'proof_fingerprint':fp,
             'stage_report_sha256':sha_file(folder/'stage_report.json'),
             'history_sha256':report['history_file_sha256'],
             'checkpoints':report['checkpoints']}
-
 
 def run_smoke(a,kind):
     import torch
@@ -868,7 +933,7 @@ def run_smoke(a,kind):
     if kind=='stability':
         proof=load_json(a.stress_run/'stage_report.json')
         parent=Path(proof['checkpoints'][-1]['checkpoint'])
-        meta,state=verify_checkpoint(a,parent)
+        meta,state=verify_checkpoint(a,parent,proof_version_override=proof_version(a,a.stress_run))
         previous_step=meta['optimizer_step']
     model,trainable,placement=attach_model(a,adapter=parent/'adapter' if parent else None)
     opt=optimizer_for(a,trainable)
@@ -889,8 +954,8 @@ def run_smoke(a,kind):
     need(meta['optimizer_step']==previous_step+len(history),'SMOKE_CHECKPOINT_STEP_DRIFT')
     stage_history(a,history)
     report=write_stage_report(a,kind,
-        'I01C_V2_STRESS_PASS_NOT_M1_TRAINING' if kind=='stress'
-        else 'I01C_V2_STABILITY_PASS_NOT_M1_TRAINING',history,[proof],{
+        'I01C_V3_STRESS_PASS_NOT_M1_TRAINING' if kind=='stress'
+        else 'I01C_V3_STABILITY_PASS_NOT_M1_TRAINING',history,[proof],{
             'previous_stage_run':str(a.stress_run) if a.stress_run else None,
             'reloaded_previous_adapter_and_optimizer':parent is not None,
             'base_optimizer_step':previous_step,'final_optimizer_step':meta['optimizer_step'],
@@ -982,7 +1047,7 @@ def run_training(a,resume=False):
                    for p in sorted(final_adapter.rglob('*')) if p.is_file()}
     need(any(x.endswith('.safetensors') for x in adapter_files),
          'FINAL_ADAPTER_SAFETENSORS_MISSING')
-    final_manifest={'status':'I01C_V2_FINAL_LORA_ADAPTER_COMPLETE',
+    final_manifest={'status':'I01C_V3_FINAL_LORA_ADAPTER_COMPLETE',
                     'version':a.version,'at_chicago':now(),
                     'config_fingerprint':fingerprint(a),
                     'prepared_manifest_sha256':a.prepared_manifest_sha256,
@@ -993,7 +1058,7 @@ def run_training(a,resume=False):
                     'finetuning_method':'lora','base_precision':'bf16',
                     'quantization':'none','vision_tower_lora':False}
     new_json(a.run_dir/'adapter_manifest.json',final_manifest)
-    summary={'status':'I01C_V2_M1_SOURCE_ONLY_TRAINING_COMPLETE',
+    summary={'status':'I01C_V3_M1_SOURCE_ONLY_TRAINING_COMPLETE',
              'version':a.version,'at_chicago':now(),
              'config_fingerprint':fingerprint(a),
              'effective_parameters':config(a),
@@ -1035,10 +1100,10 @@ def finalize(a):
     target=a.run_dir/'run_manifest.json'
     step= a.mode[2:]
     status_name= {
-      'stress':'I01C_V2_STRESS_PASS_NOT_M1_TRAINING',
-      'stability':'I01C_V2_STABILITY_PASS_NOT_M1_TRAINING',
-      'train':'I01C_V2_M1_SOURCE_ONLY_TRAINING_COMPLETE',
-      'resume':'I01C_V2_M1_SOURCE_ONLY_TRAINING_COMPLETE'}[step]
+      'stress':'I01C_V3_STRESS_PASS_NOT_M1_TRAINING',
+      'stability':'I01C_V3_STABILITY_PASS_NOT_M1_TRAINING',
+      'train':'I01C_V3_M1_SOURCE_ONLY_TRAINING_COMPLETE',
+      'resume':'I01C_V3_M1_SOURCE_ONLY_TRAINING_COMPLETE'}[step]
     present=[p for p in sorted(a.run_dir.rglob('*')) if p.is_file() and not p.is_symlink()
              and p!=target]
     # Checkpoint optimizer state can be large: preserve bytes and integrity hashes.
@@ -1052,7 +1117,7 @@ def finalize(a):
         need(target_report.is_file() and load_json(target_report)['status']==status_name,
              'PASS_CANNOT_OMIT_COMPLETE_STAGE_RESULT')
     manifest={'version':a.version,'experiment':a.experiment,'mode':a.mode,
-              'status':status_name if a.run_status=='PASS' else 'I01C_V2_STAGE_FAILED',
+              'status':status_name if a.run_status=='PASS' else 'I01C_V3_STAGE_FAILED',
               'final_status':a.run_status,'exit_code':a.exit_code,
               'at_chicago':now(),'config_fingerprint':fingerprint(a),
               'effective_parameters':config(a),
@@ -1077,7 +1142,7 @@ def main(argv=None):
         else:raise StageError('UNKNOWN_STAGE')
         return 0
     except Exception as error:
-        print(json.dumps({'status':'I01C_V2_STAGE_FAIL',
+        print(json.dumps({'status':'I01C_V3_STAGE_FAIL',
                           'stage':a.stage if a else 'argparse',
                           'error':type(error).__name__+':'+str(error),
                           'chicago':now()}),file=sys.stderr,flush=True)
