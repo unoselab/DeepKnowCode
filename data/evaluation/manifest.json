@@ -19,8 +19,7 @@
       "pairs": 7942,
       "positive_pairs": 3971,
       "negative_pairs": 3971,
-      "dataset_path": "data/evaluation/ground_truth/python/verified_pairs.jsonl",
-      "label_field": "gold_label"
+      "dataset_path": "data/evaluation/ground_truth/python/verified_pairs.jsonl"
     }
   },
   "source_provenance": {
