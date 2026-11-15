@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""I-01c v3: Gemma 4 BF16 source-only LoRA with immutable I-01b input and staged proof.
+"""I-01c v4: Gemma 4 BF16 source-only LoRA with immutable I-01b input and staged proof.
 
 No experiment-specific value is defaulted here. Shell passes ALL configuration by CLI.
 Preflight is read-only on source/model; modes create only unique run directories.
@@ -109,7 +109,8 @@ stability_balanced_labels save_optimizer_state log_dir log_prefix log_timestamp_
 log_tee log_stderr expected_torch expected_torch_cuda expected_transformers
 expected_peft expected_accelerate'''.split()
 INT_FIELDS = '''expected_gpus min_compute_major max_gpu_placement_gib max_cpu_placement_gib
-min_gpu_headroom_gib max_gpu_peak_reserved_gib expected_lora_target_modules
+min_gpu_headroom_gib max_gpu_peak_reserved_gib cache_reclaim_trigger_gib cache_reclaim_headroom_gib
+cache_check_microbatch_every expected_lora_target_modules
 expected_trainable_parameters lora_rank lora_alpha seed source_train_count
 source_validation_count source_train_positives source_train_negatives source_validation_positives
 source_validation_negatives max_seq_length expected_yes_token_id expected_no_token_id
@@ -117,11 +118,13 @@ per_device_batch_size gradient_accumulation_steps max_steps expected_epochs warm
 stress_steps stress_min_tokens stability_steps log_steps progress_microbatch_every
 eval_steps eval_batch_size save_steps'''.split()
 DYNAMIC_FIELDS = {'mode', 'run_dir', 'log_file', 'stress_run', 'stability_run', 'resume_checkpoint'}
-# These v3 compatibility pins are supplied explicitly by Shell. They never
+# These v4 compatibility pins are supplied explicitly by Shell. They never
 # become implicit v2 experiment settings when rebuilding its fingerprint.
-LEGACY_V3_FIELDS = {'legacy_v2_engine_sha256', 'legacy_v2_log_prefix',
+LEGACY_COMPAT_EXCLUDE_FIELDS = {'legacy_v2_engine_sha256', 'legacy_v2_log_prefix',
                     'legacy_v2_fingerprint', 'legacy_v2_stress_report_sha256',
-                    'legacy_v2_stability_report_sha256'}
+                    'legacy_v2_stability_report_sha256',
+                    'cache_reclaim_trigger_gib', 'cache_reclaim_headroom_gib',
+                    'cache_check_microbatch_every'}
 
 
 
@@ -166,12 +169,12 @@ def fingerprint(a):
 
 
 def legacy_v2_fingerprint(a):
-    """Rebuild immutable v2 fingerprint from v3 Shell-provided v2 settings.
+    """Rebuild immutable v2 fingerprint from v4 Shell-provided v2 settings.
 
-    This has no effect on the v3 training fingerprint; only proves exact
+    This has no effect on the v4 training fingerprint; only proves exact
     compatibility with completed v2 Stress/Stability evidence.
     """
-    old = {k:v for k,v in stable_config(a).items() if k not in LEGACY_V3_FIELDS}
+    old = {k:v for k,v in stable_config(a).items() if k not in LEGACY_COMPAT_EXCLUDE_FIELDS}
     old['version'] = 'v2'
     old['expected_engine_sha256'] = a.legacy_v2_engine_sha256
     old['log_prefix'] = a.legacy_v2_log_prefix
@@ -179,7 +182,7 @@ def legacy_v2_fingerprint(a):
 
 
 def proof_version(a, folder):
-    """Only completed v2 or current v3 stage runs may serve as proofs."""
+    """Only completed v2 or current v4 stage runs may serve as proofs."""
     recorded = load_json(Path(folder)/'run_manifest.json').get('version')
     need(recorded in ('v2', a.version), f'UNSUPPORTED_STAGE_PROOF_VERSION:{recorded}')
     return recorded
@@ -197,7 +200,7 @@ def proof_fingerprint(a, version):
 
 def validate_config(a):
     need(a.mode in ('--stress', '--stability', '--train', '--resume'), 'MODE_INVALID')
-    need(a.version == 'v3' and a.experiment == 'i-01c', 'EXPERIMENT_OR_VERSION_DRIFT')
+    need(a.version == 'v4' and a.experiment == 'i-01c', 'EXPERIMENT_OR_VERSION_DRIFT')
     need(a.base_precision == 'bf16' and a.finetuning_method == 'lora' and
          a.quantization == 'none', 'QLORA_OR_UNAPPROVED_PRECISION_FORBIDDEN')
     need(a.model_auto_class == 'AutoModelForMultimodalLM', 'GEMMA_MODEL_CLASS_DRIFT')
@@ -217,6 +220,12 @@ def validate_config(a):
     need(a.max_gpu_placement_gib > 0 and a.max_cpu_placement_gib > 0 and
          a.min_gpu_headroom_gib > 0 and a.max_gpu_peak_reserved_gib > 0,
          'GPU_MEMORY_CONFIGURATION_INVALID')
+    need(a.cache_reclaim_trigger_gib > 0 and
+         a.cache_reclaim_trigger_gib < a.max_gpu_peak_reserved_gib and
+         a.cache_reclaim_headroom_gib >= a.min_gpu_headroom_gib and
+         a.cache_reclaim_headroom_gib < a.max_gpu_peak_reserved_gib and
+         1 <= a.cache_check_microbatch_every <= a.gradient_accumulation_steps,
+         'CACHE_RECLAIM_CONFIGURATION_INVALID')
     need(a.lora_rank > 0 and a.lora_alpha > 0 and 0 <= a.lora_dropout < 1 and
          a.expected_lora_target_modules > 0 and a.expected_trainable_parameters > 0,
          'LORA_CONFIGURATION_INVALID')
@@ -427,7 +436,7 @@ def preflight(a):
         verify_stage_run(a, a.stability_run, 'stability')
     if a.mode == '--resume':
         verify_checkpoint(a, a.resume_checkpoint, require_training=True)
-    evidence={'version':a.version,'status':'I01C_V3_PREFLIGHT_PASS_NOT_TRAINED',
+    evidence={'version':a.version,'status':'I01C_V4_PREFLIGHT_PASS_NOT_TRAINED',
               'at_chicago':now(),'config_fingerprint':fingerprint(a),
               'effective_parameters':config(a),'source':prepared,
               'snapshot':snapshot,'environment':hardware,
@@ -585,7 +594,7 @@ def get_training_inputs(a, phase):
     tok,template=load_tokenizer(a)
     tokens={part:tokenize_samples(a,tok,template,rows[part],codes,indices[part],part)
             for part in ('train','validation')}
-    report={'version':a.version,'status':'I01C_V3_TOKEN_AUDIT_PASS',
+    report={'version':a.version,'status':'I01C_V4_TOKEN_AUDIT_PASS',
             'at_chicago':now(),'prepared_manifest_sha256':a.prepared_manifest_sha256,
             'config_fingerprint':fingerprint(a),'phase':phase,
             'tokenized_sample_counts':{k:len(v) for k,v in tokens.items()},
@@ -662,29 +671,70 @@ def attach_model(a, adapter=None):
 
 
 def gpu_snapshot(a):
+    """Separate live tensor memory from the inactive CUDA caching allocator."""
     import torch
     values=[]
     for i in range(a.expected_gpus):
         free,total=torch.cuda.mem_get_info(i)
+        allocated=torch.cuda.memory_allocated(i)/2**30
+        reserved=torch.cuda.memory_reserved(i)/2**30
         values.append({'gpu':i,'free_gib':round(free/2**30,4),
                        'total_gib':round(total/2**30,4),
-                       'allocated_gib':round(torch.cuda.memory_allocated(i)/2**30,4),
-                       'reserved_gib':round(torch.cuda.memory_reserved(i)/2**30,4),
+                       'allocated_gib':round(allocated,4),
+                       'reserved_gib':round(reserved,4),
+                       'inactive_cache_gib':round(max(0.0,reserved-allocated),4),
                        'peak_reserved_gib':round(torch.cuda.max_memory_reserved(i)/2**30,4),
                        'peak_allocated_gib':round(torch.cuda.max_memory_allocated(i)/2**30,4)})
     return values
 
 
 def check_memory(a, phase, step=None, microbatch=None):
-    vals=gpu_snapshot(a)
-    for v in vals:
-        need(v['free_gib']>=a.min_gpu_headroom_gib,
-             f'GPU_HEADROOM_EXHAUSTED:{phase}:gpu={v["gpu"]}:free={v["free_gib"]}')
-        need(v['peak_reserved_gib']<=a.max_gpu_peak_reserved_gib,
-             f'GPU_PEAK_RESERVED_BUDGET_EXCEEDED:{phase}:gpu={v["gpu"]}:peak={v["peak_reserved_gib"]}')
+    """Reclaim inactive CUDA cache only at completed-backward boundaries.
+
+    Peak reserved / allocated readings are historical and NEVER reset here.
+    Do not lower headroom or peak budgets to turn an OOM into a false PASS.
+    """
+    import torch
+    before=gpu_snapshot(a)
+    reclaim=[v['gpu'] for v in before
+             if v['reserved_gib'] >= a.cache_reclaim_trigger_gib
+             or v['free_gib'] < a.cache_reclaim_headroom_gib]
+    if reclaim:
+        for gpu in reclaim:
+            with torch.cuda.device(gpu):
+                torch.cuda.synchronize(gpu)
+                torch.cuda.empty_cache()
+        after=gpu_snapshot(a)
+        event('GPU_INACTIVE_CACHE_RECLAIMED',phase=phase,step=step,
+              microbatch=microbatch,device_ids=reclaim,
+              trigger_reserved_gib=a.cache_reclaim_trigger_gib,
+              trigger_headroom_gib=a.cache_reclaim_headroom_gib,
+              before=before,after=after)
+    else:
+        after=before
+    issues=[]
+    for v in after:
+        if v['free_gib'] < a.min_gpu_headroom_gib:
+            issues.append(f'GPU_HEADROOM_EXHAUSTED:gpu={v["gpu"]}:free={v["free_gib"]}')
+        if v['peak_reserved_gib'] > a.max_gpu_peak_reserved_gib:
+            issues.append(f'GPU_PEAK_RESERVED_BUDGET_EXCEEDED:gpu={v["gpu"]}:peak={v["peak_reserved_gib"]}')
+        if v['peak_allocated_gib'] > a.max_gpu_placement_gib:
+            issues.append(f'GPU_PEAK_ACTIVE_BUDGET_EXCEEDED:gpu={v["gpu"]}:peak={v["peak_allocated_gib"]}')
+    if issues:
+        report={'status':'I01C_V4_MEMORY_GUARD_FAIL',
+                'phase':phase,'optimizer_step':step,'microbatch':microbatch,
+                'reason_codes':issues,'before':before,'after':after,
+                'limits':{'min_driver_free_gib':a.min_gpu_headroom_gib,
+                          'max_historical_peak_reserved_gib':a.max_gpu_peak_reserved_gib,
+                          'max_historical_peak_allocated_gib':a.max_gpu_placement_gib},
+                'at_chicago':now()}
+        target=a.run_dir/'memory_guard_failure.json'
+        if not target.exists():new_json(target,report)
+        event('GPU_MEMORY_GUARD_FAIL',**report)
+        raise StageError('GPU_MEMORY_GUARD_FAIL:'+phase+':'+','.join(issues))
     if step is not None:
-        event('GPU_MEMORY',phase=phase,step=step,microbatch=microbatch,gpus=vals)
-    return vals
+        event('GPU_MEMORY',phase=phase,step=step,microbatch=microbatch,gpus=after)
+    return after
 
 
 def supervised_inputs(model, ids):
@@ -729,10 +779,15 @@ def real_optimizer_step(a,model,trainable,opt,examples,step,rate):
         (loss/len(examples)).backward()
         losses.append(float(loss.detach().cpu()))
         sizes.append(len(ids))
+        # No forward graph must survive into the next microbatch. LoRA gradient
+        # accumulation remains intact; only completed-graph references are freed.
+        del loss, outputs, tensors
         if j%a.progress_microbatch_every==0 or j==len(examples):
             event('MICROBATCH_PROGRESS',optimizer_step=step,microbatch=j,
                   microbatches=len(examples),input_tokens=len(ids),
                   loss=losses[-1],learning_rate=rate)
+        if j%a.cache_check_microbatch_every==0 or j==len(examples):
+            check_memory(a,'microbatch_graph_free_boundary',step=step,microbatch=j)
     counts=0
     for name,parameter in trainable:
         need(parameter.grad is not None,f'MISSING_LORA_GRADIENT:{name}')
@@ -776,7 +831,7 @@ def checkpoint(a,model,opt,step,phase):
     files={str(p.relative_to(tmp)):sha_file(p) for p in sorted(tmp.rglob('*')) if p.is_file()}
     need('optimizer_state.pt' in files and any(k.endswith('.safetensors') for k in files),
          'CHECKPOINT_ADAPTER_OR_OPTIMIZER_MISSING')
-    manifest={'version':a.version,'status':'I01C_V3_CHECKPOINT_COMPLETE',
+    manifest={'version':a.version,'status':'I01C_V4_CHECKPOINT_COMPLETE',
               'at_chicago':now(),'phase':phase,'optimizer_step':step,
               'config_fingerprint':fingerprint(a),
               'prepared_manifest_sha256':a.prepared_manifest_sha256,
@@ -866,7 +921,7 @@ def write_stage_report(a,kind,status,history,checkpoints,extra):
 
 
 def verify_stage_run(a, folder, kind):
-    """Validate v2 pinned stage proofs or v3-native proofs, fail closed.
+    """Validate v2 pinned stage proofs or v4-native proofs, fail closed.
 
     Legacy v2 stage reports are pinned by SHA256 from actual server evidence,
     and all checkpoint artifacts are rehashed on the server before training.
@@ -954,8 +1009,8 @@ def run_smoke(a,kind):
     need(meta['optimizer_step']==previous_step+len(history),'SMOKE_CHECKPOINT_STEP_DRIFT')
     stage_history(a,history)
     report=write_stage_report(a,kind,
-        'I01C_V3_STRESS_PASS_NOT_M1_TRAINING' if kind=='stress'
-        else 'I01C_V3_STABILITY_PASS_NOT_M1_TRAINING',history,[proof],{
+        'I01C_V4_STRESS_PASS_NOT_M1_TRAINING' if kind=='stress'
+        else 'I01C_V4_STABILITY_PASS_NOT_M1_TRAINING',history,[proof],{
             'previous_stage_run':str(a.stress_run) if a.stress_run else None,
             'reloaded_previous_adapter_and_optimizer':parent is not None,
             'base_optimizer_step':previous_step,'final_optimizer_step':meta['optimizer_step'],
@@ -977,6 +1032,9 @@ def evaluate(a,model,tokenized,step):
             need(out.loss is not None and torch.isfinite(out.loss).item(),
                  f'VALIDATION_LOSS_NOT_FINITE:{step}:{i}')
             losses.append(float(out.loss.detach().cpu()))
+            del out
+            if i % a.cache_check_microbatch_every==0 or i==len(tokenized):
+                check_memory(a,'validation_graph_free_boundary',step=step,microbatch=i)
             if i % a.log_steps==0 or i==len(tokenized):
                 event('VALIDATION_PROGRESS',step=step,done=i,total=len(tokenized))
     model.train()
@@ -1047,7 +1105,7 @@ def run_training(a,resume=False):
                    for p in sorted(final_adapter.rglob('*')) if p.is_file()}
     need(any(x.endswith('.safetensors') for x in adapter_files),
          'FINAL_ADAPTER_SAFETENSORS_MISSING')
-    final_manifest={'status':'I01C_V3_FINAL_LORA_ADAPTER_COMPLETE',
+    final_manifest={'status':'I01C_V4_FINAL_LORA_ADAPTER_COMPLETE',
                     'version':a.version,'at_chicago':now(),
                     'config_fingerprint':fingerprint(a),
                     'prepared_manifest_sha256':a.prepared_manifest_sha256,
@@ -1058,7 +1116,7 @@ def run_training(a,resume=False):
                     'finetuning_method':'lora','base_precision':'bf16',
                     'quantization':'none','vision_tower_lora':False}
     new_json(a.run_dir/'adapter_manifest.json',final_manifest)
-    summary={'status':'I01C_V3_M1_SOURCE_ONLY_TRAINING_COMPLETE',
+    summary={'status':'I01C_V4_M1_SOURCE_ONLY_TRAINING_COMPLETE',
              'version':a.version,'at_chicago':now(),
              'config_fingerprint':fingerprint(a),
              'effective_parameters':config(a),
@@ -1081,6 +1139,10 @@ def run_training(a,resume=False):
              'final_optimizer_log':last,
              'model_device_map':placement,
              'memory_after_loading':mem_start, 'memory_final':gpu_snapshot(a),
+             'cache_reclaim_policy':{'trigger_reserved_gib':a.cache_reclaim_trigger_gib,
+                'trigger_headroom_gib':a.cache_reclaim_headroom_gib,
+                'check_microbatch_every':a.cache_check_microbatch_every,
+                'historical_peak_not_reset':True},
              'adapter_manifest_sha256':sha_file(a.run_dir/'adapter_manifest.json'),
              'training_history_sha256':sha_file(history_file),
              'token_audit_sha256':sha_file(a.run_dir/'token_audit.json'),
@@ -1100,10 +1162,10 @@ def finalize(a):
     target=a.run_dir/'run_manifest.json'
     step= a.mode[2:]
     status_name= {
-      'stress':'I01C_V3_STRESS_PASS_NOT_M1_TRAINING',
-      'stability':'I01C_V3_STABILITY_PASS_NOT_M1_TRAINING',
-      'train':'I01C_V3_M1_SOURCE_ONLY_TRAINING_COMPLETE',
-      'resume':'I01C_V3_M1_SOURCE_ONLY_TRAINING_COMPLETE'}[step]
+      'stress':'I01C_V4_STRESS_PASS_NOT_M1_TRAINING',
+      'stability':'I01C_V4_STABILITY_PASS_NOT_M1_TRAINING',
+      'train':'I01C_V4_M1_SOURCE_ONLY_TRAINING_COMPLETE',
+      'resume':'I01C_V4_M1_SOURCE_ONLY_TRAINING_COMPLETE'}[step]
     present=[p for p in sorted(a.run_dir.rglob('*')) if p.is_file() and not p.is_symlink()
              and p!=target]
     # Checkpoint optimizer state can be large: preserve bytes and integrity hashes.
@@ -1117,7 +1179,7 @@ def finalize(a):
         need(target_report.is_file() and load_json(target_report)['status']==status_name,
              'PASS_CANNOT_OMIT_COMPLETE_STAGE_RESULT')
     manifest={'version':a.version,'experiment':a.experiment,'mode':a.mode,
-              'status':status_name if a.run_status=='PASS' else 'I01C_V3_STAGE_FAILED',
+              'status':status_name if a.run_status=='PASS' else 'I01C_V4_STAGE_FAILED',
               'final_status':a.run_status,'exit_code':a.exit_code,
               'at_chicago':now(),'config_fingerprint':fingerprint(a),
               'effective_parameters':config(a),
@@ -1142,7 +1204,7 @@ def main(argv=None):
         else:raise StageError('UNKNOWN_STAGE')
         return 0
     except Exception as error:
-        print(json.dumps({'status':'I01C_V3_STAGE_FAIL',
+        print(json.dumps({'status':'I01C_V4_STAGE_FAIL',
                           'stage':a.stage if a else 'argparse',
                           'error':type(error).__name__+':'+str(error),
                           'chicago':now()}),file=sys.stderr,flush=True)

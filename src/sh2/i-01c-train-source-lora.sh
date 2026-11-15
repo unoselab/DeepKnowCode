@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# I-01c v3: standalone, shell-configured Gemma 4 BF16 LoRA M1 pipeline.
+# I-01c v4: standalone, shell-configured Gemma 4 BF16 LoRA M1 pipeline.
 # No external shell wrapper is invoked. Every experiment-specific parameter is here.
 set -Eeuo pipefail
 export TZ=America/Chicago
@@ -11,7 +11,7 @@ export TOKENIZERS_PARALLELISM=false
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN="python"
 ENGINE="$ROOT/src/py2/i-01c-train-source-lora.py"
-VERSION="v3"
+VERSION="v4"
 EXPERIMENT="i-01c"
 CONDA_ENV="deepknowcode-gemma"
 MODEL_ID="google/gemma-4-31B-it"
@@ -41,6 +41,11 @@ MAX_GPU_PLACEMENT_GIB=39
 MAX_CPU_PLACEMENT_GIB=64
 MIN_GPU_HEADROOM_GIB=3
 MAX_GPU_PEAK_RESERVED_GIB=45
+# V4: explicit, safe inactive allocator cache reclamation thresholds.
+# These do not weaken the original headroom=3 / peak-reserved=45 hard guards.
+CACHE_RECLAIM_TRIGGER_GIB=30
+CACHE_RECLAIM_HEADROOM_GIB=8
+CACHE_CHECK_MICROBATCH_EVERY=6
 EXPECTED_TORCH="2.15.0"
 EXPECTED_TORCH_CUDA="13.2"
 EXPECTED_TRANSFORMERS="5.23.0"
@@ -62,7 +67,7 @@ SEED=2026
 # Never discover "latest" and never silently substitute a different run.
 PINNED_STRESS_RUN="$ROOT/results/i-01/gemma-4-31b-it/2026-1114-212340-48702-ZtOXlk"
 PINNED_STABILITY_RUN="$ROOT/results/i-01/gemma-4-31b-it/2026-1114-212754-49133-HRolQT"
-# Deliberate legacy-v2 evidence compatibility; v3 Training uses a fresh adapter.
+# Deliberate legacy-v2 evidence compatibility; v4 Training uses a fresh adapter.
 LEGACY_V2_ENGINE_SHA256="65d1c156e346a960c628afd0b067aed627a2f05ff8910cb2fcfc60c7f0a38e3a"
 LEGACY_V2_LOG_PREFIX="i-01c-v2"
 LEGACY_V2_FINGERPRINT="2812804013c58677b1fb9bd2ba0b98fd58e12d8ba9cbdf998945da44bf7183f4"
@@ -81,7 +86,7 @@ I01A_PREFLIGHT_SHA256="3c08a2aca0a88c2e8cc0034a8439728bf62cea5cf46bce3873c5b860e
 I01A_TOKENIZER_SHA256="66809d4fa8e84561829153b31f5100cfc4bfaa8d565af9599235e2b3c5fcbce5"
 I01A_LORA_SHA256="f6541e9968ca2ac913bdc9c9a095b59d5b0fd65b77ba1c150d6ca3e40e389612"
 I01A_WEIGHTS_SHA256="8eccf85cbf1cfd0fd0508cfd60a2fc71bc9e8d0fe7107c5ed71f19837e4215d3"
-EXPECTED_ENGINE_SHA256="ae9fb4f03960684017874a65d585b8afe32c59bfed44796be69757732c272b41"
+EXPECTED_ENGINE_SHA256="6fd75ec720f81575917acc305d748c08efd13738d110eb23ba925918db0c3140"
 PREPARED_VERIFY_REPORT_STATUS="I01B_V1_INDEPENDENT_VERIFY_PASS_NOT_TRAINED"
 SOURCE_CODES="$ROOT/data/training/clean/java_source/data.jsonl"
 FROZEN_TRAIN_SHA256="e2ec9d2cccc0adb0b73f81f60b3041b5a7f4fa519729f501c1cdc583c1e9b564"
@@ -125,7 +130,7 @@ SAVE_STEPS=100
 SAVE_OPTIMIZER_STATE="true"
 LOG_DIR="$ROOT/logs/i-01/$MODEL_MODE"
 RESULTS_DIR="$ROOT/results/i-01/$MODEL_MODE"
-LOG_PREFIX="i-01c-v3"
+LOG_PREFIX="i-01c-v4"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 LOG_TEE="true"
 LOG_STDERR="true"
@@ -174,6 +179,9 @@ ARGS=(
   --max-cpu-placement-gib "$MAX_CPU_PLACEMENT_GIB"
   --min-gpu-headroom-gib "$MIN_GPU_HEADROOM_GIB"
   --max-gpu-peak-reserved-gib "$MAX_GPU_PEAK_RESERVED_GIB"
+  --cache-reclaim-trigger-gib "$CACHE_RECLAIM_TRIGGER_GIB"
+  --cache-reclaim-headroom-gib "$CACHE_RECLAIM_HEADROOM_GIB"
+  --cache-check-microbatch-every "$CACHE_CHECK_MICROBATCH_EVERY"
   --expected-torch "$EXPECTED_TORCH" --expected-torch-cuda "$EXPECTED_TORCH_CUDA"
   --expected-transformers "$EXPECTED_TRANSFORMERS" --expected-peft "$EXPECTED_PEFT"
   --expected-accelerate "$EXPECTED_ACCELERATE"
@@ -253,8 +261,8 @@ finalize() {
 }
 on_exit() { local rc="$?"; trap - EXIT; finalize "$rc" || rc="$?"; exit "$rc"; }
 trap on_exit EXIT
-trap 'echo "[I-01c v3] SIGNAL=INT CHICAGO=$(date -Iseconds)"; exit 130' INT
-trap 'echo "[I-01c v3] SIGNAL=TERM CHICAGO=$(date -Iseconds)"; exit 143' TERM
+trap 'echo "[I-01c v4] SIGNAL=INT CHICAGO=$(date -Iseconds)"; exit 130' INT
+trap 'echo "[I-01c v4] SIGNAL=TERM CHICAGO=$(date -Iseconds)"; exit 143' TERM
 
 echo "[I-01c $VERSION] START MODE=$MODE MODEL=$MODEL_ID REVISION=$MODEL_REVISION CHICAGO=$START_CHICAGO RUN=$RUN_DIR LOG=$LOG_FILE"
 echo "[I-01c $VERSION] CONFIG BF16_LORA=true QLORA=false DATASET_TRAIN=$SOURCE_TRAIN_COUNT DATASET_VALIDATION=$SOURCE_VALIDATION_COUNT STEPS=$MAX_STEPS ACCUM=$GRADIENT_ACCUMULATION_STEPS"
