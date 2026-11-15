@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""J-01a v2: derive a Java-schema function collection AND a lossless pair map.
+"""J-01a v6: derive ONLY a Java-schema Python function collection.
 
-No training, model loading, truncation, or source modification. Fail closed.
+Read-only source; no training, truncation, resampling or source mutation.
+Pair-level labels/links are validated but intentionally not exported.
 """
 import argparse
 import collections
@@ -70,7 +71,7 @@ def normalize_label(v, n):
 
 def args_parser():
     p = argparse.ArgumentParser()
-    for k in ('mode','source','reference','output','pairs-output','report',
+    for k in ('mode','source','reference','output','report',
               'expected-pairs','left-field','right-field','code-field',
               'source-id-field','id-policy','id-prefix','label-field','pair-id-field',
               'expected-reference-keys','strict-pair-id-unique'):
@@ -91,16 +92,16 @@ def main():
     expected = int(a.expected_pairs)
     if expected <= 0:
         raise ValueError('expected-pairs must be >0')
-    src, ref, out, pairs, report = [Path(s).expanduser().resolve() for s in
-                                  (a.source,a.reference,a.output,a.pairs_output,a.report)]
-    paths = (src, ref, out, pairs, report)
+    src, ref, out, report = [Path(s).expanduser().resolve() for s in
+                                  (a.source,a.reference,a.output,a.report)]
+    paths = (src, ref, out, report)
     if len(set(paths)) != len(paths):
-        raise ValueError('source, reference, outputs and report paths must be different')
+        raise ValueError('source, reference, output and report paths must be different')
     for x in (src, ref):
         if not x.is_file():
             raise FileNotFoundError(x)
     if a.mode == 'convert':
-        for x in (out, pairs, report):
+        for x in (out, report):
             if x.exists():
                 raise FileExistsError(f'No-overwrite policy: {x}')
     try:
@@ -116,27 +117,44 @@ def main():
     for k in (a.left_field,a.right_field,a.label_field,a.pair_id_field):
         if k not in first:
             raise ValueError(f'Python source missing field {k!r}')
-    info = {'experiment':'j-01a','version':'v2','source':str(src),'reference':str(ref),
+    info = {'experiment':'j-01a','version':'v6','source':str(src),'reference':str(ref),
             'source_sha256':sha(src),'reference_sha256':sha(ref),'source_first_row_keys':sorted(first),
             'reference_first_row_keys':sorted(java_first),'expected_pairs':expected,
             'mode':a.mode,'id_policy':a.id_policy,'source_id_field':a.source_id_field,
             'code_field':a.code_field,'pair_id_field':a.pair_id_field,
             'label_field':a.label_field,'left_field':a.left_field,'right_field':a.right_field}
     if a.mode == 'inspect':
-        info['status'] = 'INSPECTED'
         for key in (a.left_field,a.right_field):
             v = first[key]
             info[key + '_type'] = type(v).__name__
             info[key + '_keys'] = sorted(v) if isinstance(v,dict) else []
-        print(json.dumps(info,indent=2,ensure_ascii=False))
-        return
+            # Validate the configured nested code field on the first real row.
+            # This catches the v3 failure before conversion starts.
+            get_function(v, key, 1, a.code_field, a.source_id_field,
+                         a.id_policy, a.id_prefix)
+            info[key + '_code_field_verified'] = True
     function_map = {}  # canonical ID -> exact code
+    # Optional annotation/provenance keys may vary between rows. Report the
+    # differences instead of treating them as a schema violation. Mandatory
+    # pair/label/side/code values are still validated for every row.
+    required_keys = {a.left_field, a.right_field, a.label_field, a.pair_id_field}
+    schema_variants = {}  # sorted key tuple -> {count, first_line, missing, extra}
     pair_ids = set()
-    pair_rows = []
+    pair_count = 0
     label_count = collections.Counter()
     for n, row in records(src):
-        if set(row) != set(first):
-            raise ValueError(f'line {n}: source schema drift')
+        missing = required_keys - row.keys()
+        if missing:
+            raise ValueError(f'line {n}: missing required source field(s): {sorted(missing)}')
+        keyset = tuple(sorted(row))
+        if keyset not in schema_variants:
+            schema_variants[keyset] = {
+                'count': 0,
+                'first_line': n,
+                'missing_vs_first': sorted(set(first) - set(row)),
+                'extra_vs_first': sorted(set(row) - set(first)),
+            }
+        schema_variants[keyset]['count'] += 1
         left_id, left_code = get_function(row[a.left_field], a.left_field, n,
                                           a.code_field,a.source_id_field,a.id_policy,a.id_prefix)
         right_id, right_code = get_function(row[a.right_field], a.right_field,n,
@@ -154,74 +172,72 @@ def main():
         pair_ids.add(str(pid))
         label = normalize_label(row[a.label_field], n)
         label_count[label] += 1
-        # Retain all original pair metadata, not just labels and references.
-        pair_rows.append({'left_id':left_id,'right_id':right_id,
-                          'source_row':row})
-    if len(pair_rows) != expected:
-        raise ValueError(f'Pair count mismatch actual={len(pair_rows)} expected={expected}')
+        pair_count += 1
+    if pair_count != expected:
+        raise ValueError(f'Pair count mismatch actual={pair_count} expected={expected}')
     if not function_map:
         raise ValueError('no functions found')
-    # Create both files in private temporary locations; no output files until all validation passes.
-    for p in (out,pairs,report):
-        p.parent.mkdir(parents=True,exist_ok=True)
-    temps = []
+    info['source_schema_variant_count'] = len(schema_variants)
+    info['source_schema_variants'] = [
+        {'keys': list(keys), **profile}
+        for keys, profile in schema_variants.items()
+    ]
+    info['required_source_fields'] = sorted(required_keys)
+    if a.mode == 'inspect':
+        info.update(status='INSPECTED', pair_count=pair_count,
+                    function_count=len(function_map),
+                    label_distribution={str(k):v for k,v in sorted(label_count.items())},
+                    all_rows_validated=True)
+        print(json.dumps(info, indent=2, ensure_ascii=False))
+        return
+    # Only one generated dataset file. All row/code/label/pair validations have passed.
+    # Stage privately and re-read generated content before publishing (no overwrite).
+    out.parent.mkdir(parents=True, exist_ok=True)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmpname = tempfile.mkstemp(prefix='.j-01a-v6-', suffix='.tmp', dir=out.parent)
+    temp = Path(tmpname)
     created = []
     try:
-        for dest in (out,pairs):
-            fd, tmpname = tempfile.mkstemp(prefix='.j-01a-v2-',suffix='.tmp',dir=dest.parent)
-            temps.append(Path(tmpname))
-            with os.fdopen(fd,'w',encoding='utf-8') as stream:
-                if dest == out:
-                    for fid, code in function_map.items():
-                        stream.write(json.dumps({'id':fid,'code':code},ensure_ascii=False,separators=(',',':'))+'\n')
-                else:
-                    for row in pair_rows:
-                        stream.write(json.dumps(row,ensure_ascii=False,separators=(',',':'))+'\n')
-                stream.flush(); os.fsync(stream.fileno())
-        # Independently verify generated content and pair relations.
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            for fid, code in function_map.items():
+                stream.write(json.dumps({'id': fid, 'code': code},
+                                        ensure_ascii=False, separators=(',', ':')) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
         verify_functions = {}
-        for _, row in records(temps[0]):
-            if set(row) != {'id','code'} or row['id'] in verify_functions:
+        for _, row in records(temp):
+            if set(row) != {'id', 'code'} or row['id'] in verify_functions:
                 raise ValueError('generated function schema or duplicate ID failure')
             verify_functions[row['id']] = row['code']
         if verify_functions != function_map:
             raise ValueError('function verification mismatch')
-        verified_pair_count = 0
-        for (_, row),(_, original) in zip(records(temps[1]),records(src)):
-            verified_pair_count += 1
-            if row.get('source_row') != original:
-                raise ValueError('pair metadata changed')
-            if row.get('left_id') not in verify_functions or row.get('right_id') not in verify_functions:
-                raise ValueError('pair references nonexistent function')
-        if verified_pair_count != expected:
-            raise ValueError('pair verification count mismatch')
-        info.update(status='PASS',pair_count=len(pair_rows),function_count=len(function_map),
+        info.update(status='PASS', pair_count=pair_count,
+                    function_count=len(function_map),
                     label_distribution={str(k):v for k,v in sorted(label_count.items())},
-                    output=str(out),pairs_output=str(pairs),
-                    output_sha256=sha(temps[0]),pairs_output_sha256=sha(temps[1]),
-                    no_truncation=True,no_resampling=True,
-                    notice='Function collection alone does not preserve pair connectivity/labels: use the pair sidecar for evaluation')
-        # Fail-closed exclusive create (never overwrite). On error, remove only created outputs.
-        for dest,tmp in zip((out,pairs),temps):
-            with dest.open('xb') as w, tmp.open('rb') as r:
-                created.append(dest)
-                for part in iter(lambda:r.read(1024*1024),b''):
-                    w.write(part)
-        with report.open('x',encoding='utf-8') as w:
+                    output=str(out), output_sha256=sha(temp),
+                    no_truncation=True, no_resampling=True,
+                    pair_map_generated=False,
+                    notice='Only function records {id,code} are exported. '
+                           'Pair relationships and labels are NOT present in python.jsonl; '
+                           'pair-level evaluation requires a separate reference.')
+        with out.open('xb') as w, temp.open('rb') as r:
+            created.append(out)
+            for part in iter(lambda: r.read(1024 * 1024), b''):
+                w.write(part)
+        with report.open('x', encoding='utf-8') as w:
             created.append(report)
-            json.dump(info,w,indent=2,ensure_ascii=False)
-        print(json.dumps(info,indent=2,ensure_ascii=False))
+            json.dump(info, w, indent=2, ensure_ascii=False)
+        print(json.dumps(info, indent=2, ensure_ascii=False))
     except Exception:
-        for p in created:
-            p.unlink(missing_ok=True)
+        for path in created:
+            path.unlink(missing_ok=True)
         raise
     finally:
-        for p in temps:
-            p.unlink(missing_ok=True)
+        temp.unlink(missing_ok=True)
 
 if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        print(f'J01A_V2_FAIL:{type(exc).__name__}:{exc}',file=sys.stderr)
+        print(f'J01A_V6_FAIL:{type(exc).__name__}:{exc}',file=sys.stderr)
         sys.exit(1)

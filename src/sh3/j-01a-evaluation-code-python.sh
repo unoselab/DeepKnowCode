@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
-# J-01a v3: standalone, non-destructive Python code-collection conversion.
+# J-01a v6: standalone, non-destructive Python code-collection conversion.
 set -Eeuo pipefail
 export TZ=America/Chicago
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 EXPERIMENT="j-01a"
-VERSION="v3"
+VERSION="v6"
 PYTHON_BIN="python"
 ENGINE="$ROOT/src/py3/j-01a-evaluation-code-python.py"
 SOURCE="$ROOT/data/evaluation/ground_truth/python/verified_pairs.jsonl"
 REFERENCE="$ROOT/data/evaluation/code/java.jsonl"
 OUTPUT="$ROOT/data/evaluation/code/python.jsonl"
-PAIRS_OUTPUT="$ROOT/data/evaluation/code/python_pairs.jsonl"
 EXPECTED_PAIRS="7942"
 LEFT_FIELD="left"
 RIGHT_FIELD="right"
-CODE_FIELD="code"
+CODE_FIELD="source_code"
 SOURCE_ID_FIELD="id"
 ID_POLICY="content-sha256"
 ID_PREFIX="py-sha256:"
@@ -24,7 +23,7 @@ EXPECTED_REFERENCE_KEYS='["id","code"]'
 STRICT_PAIR_ID_UNIQUE="true"
 LOG_DIR="$ROOT/logs/j-01a"
 RESULT_DIR="$ROOT/results/j-01a"
-LOG_PREFIX="j-01a-v3"
+LOG_PREFIX="j-01a-v6"
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 LOG_TEE="true"
 LOG_STDERR="true"
@@ -45,7 +44,7 @@ finish() {
   else
     echo "[$(date -Iseconds)] FAIL FINAL experiment=$EXPERIMENT version=$VERSION elapsed_sec=$elapsed exit=$rc"
   fi
-  printf "LOG='%s' RUN='%s' OUTPUT='%s' PAIRS_OUTPUT='%s'\n" "$LOG_PATH" "$RUN_DIR" "$OUTPUT" "$PAIRS_OUTPUT"
+  printf "LOG='%s' RUN='%s' OUTPUT='%s'\n" "$LOG_PATH" "$RUN_DIR" "$OUTPUT"
   exit "$rc"
 }
 trap finish EXIT
@@ -55,13 +54,13 @@ echo "[$(date -Iseconds)] START step=validate_files"
 [[ -f "$ENGINE" && -f "$SOURCE" && -f "$REFERENCE" ]] 
 echo "[$(date -Iseconds)] PASS step=validate_files"
 if [[ "$MODE" == "--convert" ]]; then
-  [[ ! -e "$OUTPUT" && ! -e "$PAIRS_OUTPUT" ]] || { echo "REFUSE_OVERWRITE: $OUTPUT or $PAIRS_OUTPUT" >&2; exit 3; }
+  [[ ! -e "$OUTPUT" ]] || { echo "REFUSE_OVERWRITE: $OUTPUT" >&2; exit 3; }
 fi
 REPORT="$RUN_DIR/conversion_report.json"
 echo "[$(date -Iseconds)] START step=$MODE"
 "$PYTHON_BIN" "$ENGINE" \
   --mode "${MODE#--}" --source "$SOURCE" --reference "$REFERENCE" \
-  --output "$OUTPUT" --pairs-output "$PAIRS_OUTPUT" --report "$REPORT" \
+  --output "$OUTPUT" --report "$REPORT" \
   --expected-pairs "$EXPECTED_PAIRS" --left-field "$LEFT_FIELD" --right-field "$RIGHT_FIELD" \
   --code-field "$CODE_FIELD" --source-id-field "$SOURCE_ID_FIELD" \
   --id-policy "$ID_POLICY" --id-prefix "$ID_PREFIX" \
