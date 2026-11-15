@@ -70,30 +70,57 @@ def load_manifests(paths):
     return docs
 
 
-def updated(doc, stats, args):
+def analyze_code_map(path):
+    require(path.is_file(), f'Python Code Map not found: {path}')
+    ids = set()
+    n = 0
+    with path.open(encoding='utf-8') as f:
+        for lineno, line in enumerate(f, 1):
+            require(line.strip(), f'Blank Code Map JSONL line {lineno}')
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f'Invalid Code Map JSONL line {lineno}: {e}') from e
+            require(isinstance(rec, dict) and isinstance(rec.get('id'), str) and rec['id'].strip(),
+                    f'Missing string code ID in Code Map line {lineno}')
+            require(rec['id'] not in ids, f'Duplicate Code Map ID: {rec["id"]}')
+            ids.add(rec['id'])
+            n += 1
+    require(n > 0, 'Empty Python Code Map')
+    return {'code_ids': n, 'code_map_sha256': digest(path)}
+
+
+def updated(doc, stats, code_stats, args, detailed):
     new = json.loads(json.dumps(doc))
     old = new['languages']['python']
-    if 'previous_snapshot' in old:
-        previous = old['previous_snapshot']
-        require(isinstance(previous, dict), 'Invalid previous_snapshot')
-    else:
-        legacy_fields = ('projects', 'code_ids', 'code_corpora', 'source_lines_scanned', 'pairs',
-                         'positive_pairs', 'negative_pairs')
-        previous = {k: old[k] for k in legacy_fields if k in old}
-    result = {k: v for k, v in old.items() if k not in (
-        'projects', 'pairs', 'positive_pairs', 'negative_pairs', 'code_ids',
-        'code_corpora', 'source_lines_scanned', 'previous_snapshot', 'dataset_path',
-        'dataset_sha256', 'label_field', 'dataset_provenance', 'reference_document',
-        'evaluation_file', 'ground_truth_status')}
+    # Do not lose prior observations: preserve them only in the detailed manifest.
+    previous = old.get('previous_snapshot')
+    if previous is None:
+        legacy = ('projects','code_ids','code_corpora','source_lines_scanned','pairs')
+        previous = {k: old[k] for k in legacy if k in old}
+    # Allow idempotent re-apply from v1 or v2, without expanding prior snapshot on re-run.
+    current_fields = ('projects','pairs','positive_pairs','negative_pairs','code_ids',
+        'code_corpora','source_lines_scanned','previous_snapshot','dataset_path',
+        'dataset_sha256','label_field','dataset_provenance','reference_document',
+        'evaluation_file','ground_truth_status','code_map_path','code_map_sha256')
+    result = {k:v for k,v in old.items() if k not in current_fields}
     result.update({
         'projects': stats['projects'], 'pairs': stats['pairs'],
         'positive_pairs': stats['positive_pairs'], 'negative_pairs': stats['negative_pairs'],
-        'dataset_path': args.dataset_relative_path, 'dataset_sha256': stats['dataset_sha256'],
-        'label_field': args.label_field, 'dataset_provenance': args.provenance,
-        'reference_document': args.reference_document,
-        'ground_truth_status': 'CURRENT_HELD_OUT_EVALUATION_GROUND_TRUTH',
-        'previous_snapshot': previous,
+        'dataset_path': args.dataset_relative_path,
+        'code_map_path': args.code_map_relative_path,
+        'code_ids': code_stats['code_ids']
     })
+    if detailed:
+        result.update({
+            'dataset_sha256': stats['dataset_sha256'],
+            'code_map_sha256': code_stats['code_map_sha256'],
+            'label_field': args.label_field,
+            'dataset_provenance': args.provenance,
+            'reference_document': args.reference_document,
+            'ground_truth_status': 'CURRENT_HELD_OUT_EVALUATION_GROUND_TRUTH',
+            'previous_snapshot': previous
+        })
     new['languages']['python'] = result
     require(new['languages']['java'] == doc['languages']['java'], 'Java metadata changed unexpectedly')
     require(new.get('source_provenance') == doc.get('source_provenance'), 'Source provenance changed')
@@ -120,23 +147,28 @@ def run(args):
     paths = [Path(args.manifest).resolve(strict=True), Path(args.manifest_details).resolve(strict=True)]
     require(paths[0] != paths[1], 'Manifest files must differ')
     stats = analyze_dataset(data, args)
+    code = Path(args.code_map).resolve(strict=True)
+    code_stats = analyze_code_map(code)
     docs = load_manifests(paths)
-    require(docs[0]['languages']['python'] == docs[1]['languages']['python'],
-            'Manifests have different sync states for Python; manual inspection required')
+    # The compact and detailed Python metadata intentionally differ in v2.
+    core = ('projects','pairs','positive_pairs','negative_pairs','dataset_path','code_map_path','code_ids')
+    for field in core:
+        a=docs[0]['languages']['python'].get(field)
+        b=docs[1]['languages']['python'].get(field)
+        require(a == b, f'Manifests have conflicting Python core field: {field}')
     before_java = [json.dumps(doc['languages']['java'], sort_keys=True) for doc in docs]
-    outputs = [updated(doc, stats, args) for doc in docs]
+    outputs = [updated(doc, stats, code_stats, args, detailed=(i == 1)) for i, doc in enumerate(docs)]
     new_bytes = [(json.dumps(doc, indent=2, ensure_ascii=False) + '\n').encode('utf-8') for doc in outputs]
     originals = [path.read_bytes() for path in paths]
     changed = [a != b for a, b in zip(originals, new_bytes)]
-    require(changed[0] == changed[1], 'Manifests are in different sync states; manual inspection required')
     info = {
         'status': 'H10_PYTHON_MANIFEST_PREFLIGHT_PASS' if args.mode == 'preflight' else 'H10_PYTHON_MANIFEST_APPLY_PASS',
         'mode': args.mode, 'version': args.version, 'chicago_time': datetime.now(ZoneInfo(args.timezone)).isoformat(),
-        'source_of_truth': args.reference_document, 'ground_truth': str(data),
-        'observed': stats, 'manifests': [str(p) for p in paths],
+        'source_of_truth': args.reference_document, 'ground_truth': str(data), 'code_map': str(code),
+        'observed': stats, 'code_map_observed': code_stats, 'manifests': [str(p) for p in paths],
         'manifest_before_sha256': [hashlib.sha256(b).hexdigest() for b in originals],
-        'would_change': changed, 'java_unchanged': True, 'code_id_count': 'NOT_REVALIDATED',
-        'previous_snapshot': [outputs[i]['languages']['python']['previous_snapshot'] for i in range(2)]}
+        'would_change': changed, 'java_unchanged': True, 'code_id_count': code_stats['code_ids'],
+        'compact_has_provenance': False, 'detailed_has_provenance': True}
     if args.mode == 'apply':
         require(any(changed), 'Already synchronized: refusing repeat apply')
         backup_dir = Path(args.backup_dir).resolve()
@@ -179,7 +211,7 @@ def main():
     parser = argparse.ArgumentParser()
     for arg in ('mode', 'version', 'dataset', 'manifest', 'manifest-details', 'backup-dir',
                 'audit-dir', 'expected-pairs', 'expected-positive', 'expected-negative',
-                'expected-projects', 'expected-sha256', 'dataset-relative-path',
+                'expected-projects', 'expected-sha256', 'dataset-relative-path', 'code-map', 'code-map-relative-path',
                 'label-field', 'project-field', 'provenance', 'reference-document', 'timezone'):
         parser.add_argument('--' + arg, required=True,
                             type=int if arg in ('expected-pairs', 'expected-positive', 'expected-negative', 'expected-projects') else str)

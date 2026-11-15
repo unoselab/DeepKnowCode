@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VERSION="v1"
+VERSION="v2"
 DATASET="$ROOT/data/evaluation/ground_truth/python/verified_pairs.jsonl"
+CODE_MAP_RELATIVE_PATH="data/evaluation/code/python.jsonl"
+CODE_MAP="$ROOT/$CODE_MAP_RELATIVE_PATH"
 MANIFEST="$ROOT/data/evaluation/manifest.json"
 MANIFEST_DETAILS="$ROOT/data/evaluation/manifest_details.json"
 BACKUP_DIR="$ROOT/data/evaluation/ground_truth_archives/h10-python-manifest-sync"
@@ -47,11 +49,12 @@ finish() {
 trap finish EXIT
 step PREFLIGHT START
 [[ -f "$PYTHON_SCRIPT" ]] || { echo "Missing Python implementation: $PYTHON_SCRIPT"; exit 1; }
-[[ -f "$DATASET" && -f "$MANIFEST" && -f "$MANIFEST_DETAILS" ]] || { echo "Missing data or manifest"; exit 1; }
+[[ -f "$DATASET" && -f "$CODE_MAP" && -f "$MANIFEST" && -f "$MANIFEST_DETAILS" ]] || { echo "Missing data or manifest"; exit 1; }
 step PREFLIGHT PASS
 step PYTHON_MANIFEST_SYNC START
 python "$PYTHON_SCRIPT" \
   --mode "$MODE" --version "$VERSION" --dataset "$DATASET" \
+  --code-map "$CODE_MAP" --code-map-relative-path "$CODE_MAP_RELATIVE_PATH" \
   --manifest "$MANIFEST" --manifest-details "$MANIFEST_DETAILS" \
   --backup-dir "$BACKUP_DIR" --audit-dir "$AUDIT_DIR" \
   --expected-pairs "$EXPECTED_PAIRS" --expected-positive "$EXPECTED_POSITIVE" \
