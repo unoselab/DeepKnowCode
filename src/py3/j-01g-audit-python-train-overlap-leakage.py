@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""J-01g v5: read-only Python content-ID leakage audit; never modifies inputs."""
+"""J-01g v6: read-only paired-file preservation and exact Python leakage audit."""
 import argparse
 import collections
 import csv
 import json
+import itertools
 import re
 import sys
 from datetime import datetime
@@ -57,6 +58,62 @@ def read_canonical(path, expected_total, expected_python, split):
     if not funcs or not pairs:
         raise ValueError(f'{split}: No recognized Python content IDs')
     return funcs, pairs, dict(counts)
+
+
+
+ORIGINAL_FIELDS = frozenset(('corpus', 'id1', 'id2', 'label', 'tokens'))
+DERIVED_FIELDS = frozenset(('left', 'right'))
+DERIVED_METADATA_FIELDS = frozenset(('language', 'function_id', 'source_id', 'source_dataset',
+                                    'repository', 'revision', 'path', 'start_line', 'end_line'))
+
+def compare_original_to_canonical(original, canonical, split, expected_rows, expected_python_rows):
+    """Validate each original row is preserved exactly, in order; only Python metadata added."""
+    if not original.is_file():
+        raise ValueError(f'Missing original {split} file: {original}')
+    counter = collections.Counter()
+    orig_iter = rows(original)
+    canonical_iter = rows(canonical)
+    missing = object()
+    for index, pair in enumerate(itertools.zip_longest(orig_iter, canonical_iter, fillvalue=missing), 1):
+        left, right = pair
+        if left is missing or right is missing:
+            raise ValueError(f'{split}: original/canonical row count or order mismatch at record {index}')
+        _, base = left
+        _, derived = right
+        if set(base) != ORIGINAL_FIELDS:
+            raise ValueError(f'{split}: original fields differ from expected schema at row {index}: {sorted(base)}')
+        is_python = base['corpus'] == 'python_mixed'
+        expected_keys = ORIGINAL_FIELDS | DERIVED_FIELDS if is_python else ORIGINAL_FIELDS
+        if set(derived) != expected_keys:
+            raise ValueError(f'{split}: canonical keys mismatch at row {index}: {sorted(derived)}')
+        for field in ORIGINAL_FIELDS:
+            # Encoded structural equality avoids Python's bool == int coercion.
+            before = json.dumps(base[field], ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+            after = json.dumps(derived[field], ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+            if before != after:
+                raise ValueError(f'{split}: original field changed at row {index}: {field}')
+        if is_python:
+            counter['python_mixed'] += 1
+            for side, source_field in (('left', 'id1'), ('right', 'id2')):
+                meta = derived[side]
+                if not isinstance(meta, dict) or set(meta) != DERIVED_METADATA_FIELDS:
+                    raise ValueError(f'{split}: unexpected derived {side} metadata fields at row {index}')
+                if (meta['language'] != 'python' or meta['source_dataset'] != 'python_mixed'
+                        or meta['source_id'] != base[source_field]):
+                    raise ValueError(f'{split}: derived {side} provenance differs from original ID at row {index}')
+                check_hash(meta['function_id'], f'{split}:row={index}:{side}')
+                if any(meta[k] is not None for k in ('repository','revision','path','start_line','end_line')):
+                    raise ValueError(f'{split}: derived {side} invents provenance at row {index}')
+        counter['rows_compared'] += 1
+    if counter['rows_compared'] != expected_rows or counter['python_mixed'] != expected_python_rows:
+        raise ValueError(f'{split}: paired-file totals mismatch: {dict(counter)}')
+    return {'original_file':str(original), 'canonical_file':str(canonical),
+            'rows_compared':counter['rows_compared'],
+            'python_rows_with_derived_metadata':counter['python_mixed'],
+            'non_python_rows_unchanged':counter['rows_compared']-counter['python_mixed'],
+            'original_fields_equal':True, 'row_order_preserved':True,
+            'only_expected_python_metadata_added':True,
+            'status':'IDENTICAL_BASE_RECORDS'}
 
 
 def audit_csv(directory, train_funcs, train_pairs, val_funcs, val_pairs, expected_rows, expected_files, expected_pos, expected_neg, examples_limit, csv_left_field, csv_right_field, csv_label_field):
@@ -118,7 +175,7 @@ def audit_csv(directory, train_funcs, train_pairs, val_funcs, val_pairs, expecte
 
 
 def run(args):
-    inputs = [args.train,args.validation]
+    inputs = [args.train,args.validation,args.original_train,args.original_validation]
     if any(not p.is_file() for p in inputs):
         raise ValueError('Canonical training/validation input missing')
     for d in (args.v1_dir,args.v2_dir):
@@ -126,10 +183,15 @@ def run(args):
             raise ValueError(f'Missing evaluation directory: {d}')
     if args.output.exists():
         raise ValueError(f'No-overwrite: audit report already exists: {args.output}')
+    paired = {
+        'train': compare_original_to_canonical(args.original_train,args.train,'train',args.expected_train_rows,args.expected_train_python_rows),
+        'validation': compare_original_to_canonical(args.original_validation,args.validation,'validation',args.expected_validation_rows,args.expected_validation_python_rows)
+    }
     tf,tp,tc=read_canonical(args.train,args.expected_train_rows,args.expected_train_python_rows,'train')
     vf,vp,vc=read_canonical(args.validation,args.expected_validation_rows,args.expected_validation_python_rows,'validation')
     res={'experiment':'j-01g','version':args.version,'timestamp_chicago':datetime.now(ZoneInfo('America/Chicago')).isoformat(),
          'status':'UNDETERMINED','scope':'EXACT_PYTHON_FUNCTION_CONTENT_IDS_AND_UNORDERED_PAIRS',
+         'paired_file_integrity':paired,
          'canonical':{'train_file':str(args.train),'validation_file':str(args.validation),
                       'train':tc,'validation':vc,
                       'train_distinct_function_content_ids':len(tf),'train_distinct_unordered_pairs':len(tp),
@@ -155,7 +217,7 @@ def run(args):
 
 def parse():
     p=argparse.ArgumentParser()
-    for name in ('version','train','validation','v1-dir','v2-dir','output','csv-left-field','csv-right-field','csv-label-field'):
+    for name in ('version','train','validation','original-train','original-validation','v1-dir','v2-dir','output','csv-left-field','csv-right-field','csv-label-field'):
         p.add_argument('--'+name,required=True)
     for name in ('expected-train-rows','expected-train-python-rows','expected-validation-rows','expected-validation-python-rows','expected-v1-rows','expected-v1-positive','expected-v1-negative','expected-v2-rows','expected-v2-positive','expected-v2-negative','expected-csv-files','max-examples'):
         p.add_argument('--'+name,type=int,required=True)
@@ -163,7 +225,7 @@ def parse():
     fields = [a.csv_left_field, a.csv_right_field, a.csv_label_field]
     if len(set(fields)) != 3 or any(not v or '\n' in v or '\r' in v for v in fields):
         p.error('CSV fields must be three nonempty distinct column names')
-    for name in ('train','validation','v1_dir','v2_dir','output'):
+    for name in ('train','validation','original_train','original_validation','v1_dir','v2_dir','output'):
         setattr(a,name,Path(getattr(a,name)).expanduser().resolve())
     if any(getattr(a,name)<0 for name in ('expected_train_rows','expected_train_python_rows','expected_validation_rows','expected_validation_python_rows','expected_v1_rows','expected_v2_rows','expected_csv_files','max_examples')):
         p.error('Expected counts must be nonnegative')
@@ -179,6 +241,7 @@ def main():
             json.dump(result,f,sort_keys=True,indent=2,ensure_ascii=False)
             f.write('\n')
         print(json.dumps({'report':str(args.output),'status':result['status'],
+                          'paired_file_integrity':result['paired_file_integrity'],
                           'canonical':result['canonical'],'findings':result['finding_flags'],
                           'evaluation_summary':{k:{name:v[name] for name in ('pair_count','train_overlapping_unique_function_ids','validation_overlapping_unique_function_ids','train_exact_unordered_pair_overlap','validation_exact_unordered_pair_overlap')} for k,v in result['evaluation'].items()}},indent=2))
         return 3 if result['status']=='OVERLAP_DETECTED' else 0

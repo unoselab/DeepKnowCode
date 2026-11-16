@@ -3,7 +3,7 @@ set -Eeuo pipefail
 export TZ=America/Chicago
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EXPERIMENT='j-01g'
-VERSION='v5'
+VERSION='v6'
 MODE="${1:-}"
 if [[ $# -ne 1 || "$MODE" != '--audit' ]]; then
   echo "Usage: bash src/sh3/j-01g-audit-python-train-overlap-leakage.sh --audit" >&2
@@ -11,6 +11,9 @@ if [[ $# -ne 1 || "$MODE" != '--audit' ]]; then
 fi
 PYTHON_BIN='python3'
 SCRIPT="$ROOT/src/py3/j-01g-audit-python-train-overlap-leakage.py"
+ORIGINAL_DIR="$ROOT/data/training/prepared/balanced_multilingual"
+ORIGINAL_TRAIN="$ORIGINAL_DIR/train.jsonl"
+ORIGINAL_VALIDATION="$ORIGINAL_DIR/validation.jsonl"
 CANONICAL_DIR="$ROOT/data/training/prepared/balanced_multilingual_canonical_v2"
 TRAIN="$CANONICAL_DIR/train.jsonl"
 VALIDATION="$CANONICAL_DIR/validation.jsonl"
@@ -33,7 +36,7 @@ EXPECTED_CSV_FILES=24
 MAX_EXAMPLES=10
 LOG_DIR="$ROOT/logs/j-01g"
 RESULT_DIR="$ROOT/results/j-01g"
-LOG_PREFIX='j-01g-v5'
+LOG_PREFIX='j-01g-v6'
 LOG_TIMESTAMP_FORMAT='+%Y-%m%d-%H%M%S'
 LOG_TEE=true
 LOG_STDERR=true
@@ -66,7 +69,7 @@ REPORT_FILE="$RUN_DIR/j-01g-training-evaluation-leakage-report.json"
 trap finish EXIT
 printf '[%s] START experiment=%s version=%s mode=%s log=%s run=%s\n' "$(date -Iseconds)" "$EXPERIMENT" "$VERSION" "$MODE" "$LOG_FILE" "$RUN_DIR"
 start_step validate_files
-for file in "$SCRIPT" "$TRAIN" "$VALIDATION"; do
+for file in "$SCRIPT" "$TRAIN" "$VALIDATION" "$ORIGINAL_TRAIN" "$ORIGINAL_VALIDATION"; do
   [[ -f "$file" ]] || { echo "MISSING_FILE=$file" >&2; exit 2; }
 done
 for dir in "$V1_DIR" "$V2_DIR"; do
@@ -76,6 +79,7 @@ pass_step
 start_step audit
 "$PYTHON_BIN" "$SCRIPT" \
   --version "$VERSION" --train "$TRAIN" --validation "$VALIDATION" \
+  --original-train "$ORIGINAL_TRAIN" --original-validation "$ORIGINAL_VALIDATION" \
   --v1-dir "$V1_DIR" --v2-dir "$V2_DIR" --output "$REPORT_FILE" \
   --csv-left-field "$CSV_LEFT_FIELD" --csv-right-field "$CSV_RIGHT_FIELD" --csv-label-field "$CSV_LABEL_FIELD" \
   --expected-train-rows "$EXPECTED_TRAIN_ROWS" --expected-train-python-rows "$EXPECTED_TRAIN_PYTHON_ROWS" \
