@@ -3,17 +3,17 @@ set -Eeuo pipefail
 export TZ=America/Chicago
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EXPERIMENT="j-01f"
-VERSION="v1"
+VERSION="v2"
 MODE="${1:---inspect}"
 case "$MODE" in --inspect|--build) ;; *) echo "USAGE: bash $0 [--inspect|--build]" >&2; exit 2;; esac
-CLEAN="$ROOT/data/training/clean/python_mixed/data.jsonl"
+CLEAN="$ROOT/data/training/raw/python_mixed/data.jsonl"
 TRAIN="$ROOT/data/training/prepared/balanced_multilingual/train.jsonl"
 VALIDATION="$ROOT/data/training/prepared/balanced_multilingual/validation.jsonl"
-OUTPUT="$ROOT/data/training/prepared/balanced_multilingual_canonical_v1"
+OUTPUT="$ROOT/data/training/prepared/balanced_multilingual_canonical_v2"
 SCRIPT="$ROOT/src/py3/j-01f-canonicalize-python-training.py"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 LOG_DIR="$ROOT/logs/j-01f"
-LOG_PREFIX="j-01f-v1"
+LOG_PREFIX="j-01f-v2"
 LOG_TIMESTAMP_FORMAT="%Y-%m%d-%H%M%S"
 LOG_CAPTURE_STDOUT=true
 LOG_CAPTURE_STDERR=true

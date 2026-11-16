@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-01f v1: non-destructive schema-aware canonical Python training pair export."""
+"""J-01f v2: non-destructive schema-aware canonical Python training pair export."""
 import argparse
 import collections
 import hashlib
@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VERSION = 'v1'
+VERSION = 'v2'
 EXPECTED_KEYS = {'corpus', 'id1', 'id2', 'label', 'tokens'}
 METADATA_KEYS = ('language','function_id','source_id','source_dataset','repository','revision','path','start_line','end_line')
 
@@ -84,6 +84,7 @@ def run(args):
            'source_records':len(lookup),'split_counts':summaries,
            'shared_source_ids_between_splits':len(seen_ids['train'] & seen_ids['validation']),
            'hash_convention':'sha256(func.encode(utf-8)); no normalization',
+           'source_input_policy':'RAW_PYTHON_MIXED_IDX_FUNC_VALIDATED_AGAINST_PREPARED_PAIR_IDS',
            'provenance_policy':'Unknown repository/location/revision represented as null; no inferred provenance',
            'unchanged_non_python_records':True}
     if args.mode=='build':
