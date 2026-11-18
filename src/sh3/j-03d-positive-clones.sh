@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DeepKnowCode J-03d v2 - Positive Clone Dataset Export
+# DeepKnowCode J-03d v5 - Positive Clones + H-07/H-08 AST Type Audit
 # =============================================================================
 # Run from the DeepKnowCode project root in this order:
 #
@@ -16,6 +16,12 @@
 # 4. Final verification
 # bash src/sh3/j-03d-positive-clones.sh --verify
 #
+# 5. AST clone-type smoke test (apache__ant, read-only)
+# bash src/sh3/j-03d-positive-clones.sh --clonetypes-smoke
+#
+# 6. Full H-07/H-08 Tree-sitter clone-type candidate census
+# bash src/sh3/j-03d-positive-clones.sh --clonetypes
+#
 # Optional single subject:
 # bash src/sh3/j-03d-positive-clones.sh --subject apache__camel
 #
@@ -29,7 +35,7 @@ set -Eeuo pipefail
 
 # --------------------------- Experiment configuration -----------------------
 EXPERIMENT="j-03d"
-VERSION="v2"
+VERSION="v5"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 EXPECTED_INPUT_RELATIVE="data/clone-detection/2after-preproc"
 EXPECTED_OUTPUT_RELATIVE="data/clone-detection/3pos-clones"
@@ -58,10 +64,41 @@ CODE_ENCODING="utf-8"
 CODE_ERRORS="surrogateescape"
 PROGRESS_EVERY_FRAGMENTS=10000
 PROGRESS_EVERY_PAIRS=50000
-
+# Accept immutable v2/v3/v4 datasets; only missing exports will carry v5 manifests.
+ACCEPTED_OUTPUT_VERSIONS="v2,v3,v4,v5"
+# Legacy v3 similarity-only parameters are retained for compatibility with the
+# immutable v2/v3 positive dataset and their effective configuration.
+CLONETYPE_T1_LABEL="T1_EXACT_PREPROC_PROXY"
+CLONETYPE_T2_LABEL="T2_NICAD_100_PROXY"
+CLONETYPE_T3_LABEL="T3_NICAD_NEARMISS_PROXY"
+CLONETYPE_T4_LABEL="T4_UNDETERMINED"
+CLONETYPE_MIN_SIMILARITY="70"
+CLONETYPE_MAX_SIMILARITY="100"
+CLONETYPE_REPORT_NAME="summary-clonetype.md"
+CLONETYPE_PROGRESS_EVERY_PAIRS=500000
+# New H-07 / H-08 AST classification; ALL parameters specified in Shell.
+H07_PYTHON="$ROOT/src/py2/h-07-audit-java-tree-sitter.py"
+H08_PYTHON="$ROOT/src/py2/h-08-analyze-java-clone-types.py"
+AST_IMPL="$ROOT/src/py3/j-03d-ast-clonetypes.py"
+AST_PARSER_VERSION="0.25.2"
+AST_GRAMMAR_VERSION="0.23.5"
+AST_GRAM_SIZE=5
+AST_PRIMARY_THRESHOLD="0.82"
+AST_THRESHOLDS="0.70,0.75,0.80,0.82,0.85,0.90,0.95"
+AST_MAX_COMPARISON_CELLS=4000000
+AST_PROGRESS_FRAGMENTS=10000
+AST_PROGRESS_PAIRS=50000
+AST_FRAGMENT_CACHE_SIZE=4096
+AST_SCORE_CACHE_SIZE=25000
+AST_COMPRESSION_LEVEL=6
+AST_SAMPLE_PER_CATEGORY=4
+AST_NICAD_BAND_EDGES="100,95,90,80,70"
+# Preserve both v3 summary-clonetype.md and v4 summary-clonetype-h08-v4.md.
+# v5 report is fixed-width, split into two compact tables; T2 total is a subtotal.
+AST_REPORT_NAME="summary-clonetype-h08-v5.md"
 # ----------------------------- Logging configuration ------------------------
 LOG_DIR="$ROOT/logs/j-03d"
-LOG_PREFIX="j-03d-v2-positive-clones"
+LOG_PREFIX="j-03d-v5-positive-clones"
 LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S-%6N"
 LOG_TIME_ZONE="America/Chicago"
 LOG_TEE_APPEND="true"
@@ -73,14 +110,14 @@ export TZ="$LOG_TIME_ZONE"
 export LC_ALL=C
 now() { date '+%Y-%m-%dT%H:%M:%S%:z'; }
 usage() {
-  echo "Usage: bash src/sh3/j-03d-positive-clones.sh --inspect|--smoke|--subject SUBJECT|--all|--verify" >&2
+  echo "Usage: bash src/sh3/j-03d-positive-clones.sh --inspect|--smoke|--subject SUBJECT|--all|--verify|--clonetypes-smoke|--clonetypes" >&2
   exit 2
 }
 (( $# >= 1 )) || usage
 MODE="$1"; shift
 SUBJECT=""
 case "$MODE" in
-  --inspect|--smoke|--all|--verify) (( $# == 0 )) || usage ;;
+  --inspect|--smoke|--all|--verify|--clonetypes-smoke|--clonetypes) (( $# == 0 )) || usage ;;
   --subject)
     (( $# == 1 )) || usage
     SUBJECT="$1"
@@ -88,6 +125,11 @@ case "$MODE" in
   *) usage ;;
 esac
 [[ -f "$PYTHON_SCRIPT" ]] || { echo "Missing implementation: $PYTHON_SCRIPT" >&2; exit 2; }
+if [[ "$MODE" == "--clonetypes" || "$MODE" == "--clonetypes-smoke" ]]; then
+  for file in "$AST_IMPL" "$H07_PYTHON" "$H08_PYTHON"; do
+    [[ -f "$file" ]] || { echo "Missing AST implementation/reference: $file" >&2; exit 2; }
+  done
+fi
 command -v flock >/dev/null 2>&1 || { echo "flock command required" >&2; exit 2; }
 mkdir -p "$LOG_DIR" "$RESULT_ROOT" "$OUTPUT_ROOT"
 TAG="$(date "+$LOG_TIMESTAMP_FORMAT")-$$-$(od -An -tx1 -N6 /dev/urandom | tr -d ' \n')"
@@ -136,6 +178,24 @@ COMMON=(
   --time-zone "$LOG_TIME_ZONE"
   --progress-every-fragments "$PROGRESS_EVERY_FRAGMENTS"
   --progress-every-pairs "$PROGRESS_EVERY_PAIRS"
+  --accepted-output-versions "$ACCEPTED_OUTPUT_VERSIONS"
+  --clonetype-t1-label "$CLONETYPE_T1_LABEL"
+  --clonetype-t2-label "$CLONETYPE_T2_LABEL"
+  --clonetype-t3-label "$CLONETYPE_T3_LABEL"
+  --clonetype-t4-label "$CLONETYPE_T4_LABEL"
+  --clonetype-min-similarity "$CLONETYPE_MIN_SIMILARITY"
+  --clonetype-max-similarity "$CLONETYPE_MAX_SIMILARITY"
+  --clonetype-report-name "$CLONETYPE_REPORT_NAME"
+  --clonetype-progress-every-pairs "$CLONETYPE_PROGRESS_EVERY_PAIRS"
+  --h07-python "$H07_PYTHON" --h08-python "$H08_PYTHON" --ast-impl "$AST_IMPL"
+  --ast-parser-version "$AST_PARSER_VERSION" --ast-grammar-version "$AST_GRAMMAR_VERSION"
+  --ast-gram-size "$AST_GRAM_SIZE" --ast-primary-threshold "$AST_PRIMARY_THRESHOLD"
+  --ast-thresholds "$AST_THRESHOLDS" --ast-max-cells "$AST_MAX_COMPARISON_CELLS"
+  --ast-progress-fragments "$AST_PROGRESS_FRAGMENTS" --ast-progress-pairs "$AST_PROGRESS_PAIRS"
+  --ast-fragment-cache-size "$AST_FRAGMENT_CACHE_SIZE" --ast-score-cache-size "$AST_SCORE_CACHE_SIZE"
+  --ast-compression-level "$AST_COMPRESSION_LEVEL" --ast-sample-per-category "$AST_SAMPLE_PER_CATEGORY"
+  --ast-report-name "$AST_REPORT_NAME"
+  --ast-nicad-band-edges "$AST_NICAD_BAND_EDGES"
 )
 runpy() {
   local action="$1" subject="$2"
@@ -170,7 +230,7 @@ subjects() {
 }
 
 echo "[$(now)] START experiment=$EXPERIMENT version=$VERSION mode=$MODE run=$RUN_DIR log=$LOG_FILE"
-echo "[$(now)] CONFIG input=$INPUT_ROOT input_phase=$EXPECTED_INPUT_PHASE source=$SOURCE_ROOT output=$OUTPUT_ROOT expected_subjects=$EXPECTED_SUBJECTS expected_pairs=$EXPECTED_TOTAL_PAIRS detector=$EXPECTED_DETECTOR config=$EXPECTED_NICAD_CONFIG threshold=$EXPECTED_NICAD_THRESHOLD preproc_version=$EXPECTED_PREPROC_VERSION label=$POSITIVE_LABEL encoding=$CODE_ENCODING errors=$CODE_ERRORS time_zone=$LOG_TIME_ZONE progress_fragments=$PROGRESS_EVERY_FRAGMENTS progress_pairs=$PROGRESS_EVERY_PAIRS"
+echo "[$(now)] CONFIG input=$INPUT_ROOT input_phase=$EXPECTED_INPUT_PHASE source=$SOURCE_ROOT output=$OUTPUT_ROOT expected_subjects=$EXPECTED_SUBJECTS expected_pairs=$EXPECTED_TOTAL_PAIRS detector=$EXPECTED_DETECTOR config=$EXPECTED_NICAD_CONFIG threshold=$EXPECTED_NICAD_THRESHOLD preproc_version=$EXPECTED_PREPROC_VERSION label=$POSITIVE_LABEL encoding=$CODE_ENCODING errors=$CODE_ERRORS time_zone=$LOG_TIME_ZONE progress_fragments=$PROGRESS_EVERY_FRAGMENTS progress_pairs=$PROGRESS_EVERY_PAIRS accepted_output_versions=$ACCEPTED_OUTPUT_VERSIONS ast_primary=$AST_PRIMARY_THRESHOLD ast_gram_size=$AST_GRAM_SIZE ast_max_cells=$AST_MAX_COMPARISON_CELLS ast_report=$AST_REPORT_NAME ast_nicad_bands=$AST_NICAD_BAND_EDGES clonetype_min=$CLONETYPE_MIN_SIMILARITY clonetype_max=$CLONETYPE_MAX_SIMILARITY clonetype_report=$CLONETYPE_REPORT_NAME clonetype_progress=$CLONETYPE_PROGRESS_EVERY_PAIRS"
 case "$MODE" in
   --inspect)
     CURRENT_SUBJECT="global"
@@ -196,6 +256,12 @@ case "$MODE" in
     done
     CURRENT_SUBJECT="global"
     step aggregate runpy summarize "$SMOKE_SUBJECT" ;;
+  --clonetypes-smoke)
+    CURRENT_SUBJECT="$SMOKE_SUBJECT"
+    step ast_clonetype_smoke runpy clonetypes-smoke "$SMOKE_SUBJECT" ;;
+  --clonetypes)
+    CURRENT_SUBJECT="global"
+    step ast_clonetype_census runpy clonetypes "$SMOKE_SUBJECT" ;;
   --verify)
     subjects
     idx=0

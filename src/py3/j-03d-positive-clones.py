@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""J-03d v2: export NiCad-positive Java pairs from verified J-03c AFTER archives.
+"""J-03d v5: immutable positive export/verification and H-07/H-08 AST type audit.
 
 All experiment configuration is mandatory and supplied by the standalone Shell.
 No input mutation, no negative labels, no train/validation/test partitioning.
 """
 import argparse
 import csv
+from collections import Counter
+from decimal import Decimal, InvalidOperation
 import functools
 import hashlib
 import json
@@ -353,8 +355,11 @@ def verify_output(args, subject):
     if not mp.is_file() or mp.is_symlink():
         fail(f'OUTPUT_MANIFEST_REQUIRED subject={subject}')
     m = read_json(mp)
+    if m.get('version') not in args.accepted_output_versions:
+        fail(f'OUTPUT_VERSION_UNSUPPORTED subject={subject} version={m.get("version")!r} '
+             f'accepted={args.accepted_output_versions}')
     checks = {
-        'experiment': args.experiment, 'version': args.version,
+        'experiment': args.experiment,
         'subject': subject, 'status': 'PREPARED_VERIFIED',
         'label': args.positive_label, 'input_root': str(args.input_root),
         'source_root': str(args.source_root),
@@ -433,6 +438,18 @@ def summarize(args, names):
           f'report={args.run_dir / "aggregate_summary.json"}', flush=True)
 
 
+
+def analyze_clonetypes(args, names):
+    """Delegate to the H-07/H-08 AST analyzer; no NiCad-only Type proxy labels."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('j03d_ast_clonetypes', args.ast_impl)
+    if spec is None or spec.loader is None:
+        fail(f'AST_IMPLEMENTATION_MISSING {args.ast_impl}')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.analyze(args, names, sys.modules[__name__])
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     for flag in ('experiment', 'version', 'mode', 'subject', 'project-root',
@@ -446,24 +463,38 @@ def main():
                  'expected-nicad-threshold', 'expected-detector',
                  'expected-language', 'positive-label',
                  'code-encoding', 'code-errors', 'time-zone',
-                 'progress-every-fragments', 'progress-every-pairs'):
+                 'progress-every-fragments', 'progress-every-pairs',
+                 'accepted-output-versions', 'clonetype-t1-label',
+                 'clonetype-t2-label', 'clonetype-t3-label', 'clonetype-t4-label',
+                 'clonetype-min-similarity', 'clonetype-max-similarity',
+                 'clonetype-report-name', 'clonetype-progress-every-pairs',
+                 'h07-python', 'h08-python', 'ast-impl',
+                 'ast-parser-version', 'ast-grammar-version', 'ast-gram-size',
+                 'ast-primary-threshold', 'ast-thresholds', 'ast-max-cells',
+                 'ast-progress-fragments', 'ast-progress-pairs',
+                 'ast-fragment-cache-size', 'ast-score-cache-size',
+                 'ast-compression-level', 'ast-sample-per-category',
+                 'ast-report-name', 'ast-nicad-band-edges'):
         p.add_argument('--' + flag, required=True)
     a = p.parse_args()
-    for name in ('project_root', 'input_root', 'source_root', 'output_root', 'run_dir'):
+    for name in ('project_root', 'input_root', 'source_root', 'output_root', 'run_dir', 'h07_python', 'h08_python', 'ast_impl'):
         setattr(a, name, Path(getattr(a, name)).resolve())
     for name in ('expected_subjects', 'expected_total_pairs', 'positive_label',
-                 'progress_every_fragments', 'progress_every_pairs'):
+                 'progress_every_fragments', 'progress_every_pairs',
+                 'clonetype_progress_every_pairs', 'ast_gram_size', 'ast_max_cells',
+                 'ast_progress_fragments', 'ast_progress_pairs', 'ast_fragment_cache_size',
+                 'ast_score_cache_size', 'ast_compression_level', 'ast_sample_per_category'):
         try:
             setattr(a, name, int(getattr(a, name)))
         except ValueError:
             p.error(f'{name} must be an integer')
     if a.expected_subjects < 1 or a.expected_total_pairs < 1 or a.positive_label != 1:
         p.error('Expected subjects and pair count must be positive; positive label must be 1')
-    if a.progress_every_fragments < 1 or a.progress_every_pairs < 1:
+    if a.progress_every_fragments < 1 or a.progress_every_pairs < 1 or a.clonetype_progress_every_pairs < 1:
         p.error('Progress intervals must be positive')
-    if a.mode not in ('inspect', 'export', 'verify', 'summarize'):
+    if a.mode not in ('inspect', 'export', 'verify', 'summarize', 'clonetypes', 'clonetypes-smoke'):
         p.error('Invalid mode')
-    if a.mode in ('export', 'verify') and not NAME.fullmatch(a.subject):
+    if a.mode in ('export', 'verify', 'clonetypes-smoke') and not NAME.fullmatch(a.subject):
         p.error('Invalid subject name')
     for rel in ('expected_input_relative', 'expected_output_relative'):
         value = Path(getattr(a, rel))
@@ -477,11 +508,71 @@ def main():
         p.error('Input and output paths must resolve inside the project root')
     if a.input_root == a.output_root or a.output_root.is_relative_to(a.input_root) or a.output_root.is_relative_to(a.source_root):
         p.error('Input, source, and output directory containment conflict')
+    a.accepted_output_versions = tuple(a.accepted_output_versions.split(','))
+    if not a.accepted_output_versions or any(not re.fullmatch(r'v[0-9]+', x) for x in a.accepted_output_versions):
+        p.error('Invalid accepted output versions')
+    a.clonetype_labels = (a.clonetype_t1_label, a.clonetype_t2_label,
+                          a.clonetype_t3_label, a.clonetype_t4_label)
+    if len(set(a.clonetype_labels)) != 4 or any(not re.fullmatch(r'[A-Z0-9_]+', x) for x in a.clonetype_labels):
+        p.error('Invalid or duplicated clone type labels')
+    for attr in ('clonetype_min_similarity', 'clonetype_max_similarity'):
+        try:
+            setattr(a, attr, Decimal(getattr(a, attr)))
+        except InvalidOperation:
+            p.error(f'Invalid decimal: {attr}')
+    if not (Decimal(0) <= a.clonetype_min_similarity < a.clonetype_max_similarity == Decimal(100)):
+        p.error('Clone similarity range must satisfy 0 <= min < max == 100')
+    try:
+        threshold = Decimal(a.expected_nicad_threshold)
+    except InvalidOperation:
+        p.error('Invalid NiCad threshold')
+    if a.clonetype_min_similarity != Decimal(100) * (Decimal(1) - threshold):
+        p.error('Clone similarity minimum must equal 100*(1-NiCad threshold)')
+    if (Path(a.clonetype_report_name).name != a.clonetype_report_name
+            or a.clonetype_report_name in ('.', '..')
+            or not a.clonetype_report_name.endswith('.md')):
+        p.error('Clone type report name must be a simple .md file name')
+    for attr in ('ast_gram_size', 'ast_max_cells', 'ast_progress_fragments',
+                 'ast_progress_pairs', 'ast_fragment_cache_size', 'ast_score_cache_size'):
+        if getattr(a, attr) < 1:
+            p.error(f'Invalid AST setting: {attr} must be >= 1')
+    if not 0 <= a.ast_compression_level <= 9 or a.ast_sample_per_category < 0:
+        p.error('Invalid AST compression level or sample count')
+    try:
+        a.ast_primary_threshold = Decimal(a.ast_primary_threshold)
+        a.ast_thresholds = tuple(Decimal(x) for x in a.ast_thresholds.split(','))
+    except InvalidOperation:
+        p.error('Invalid AST thresholds')
+    if (not 0 <= a.ast_primary_threshold <= 1
+            or not a.ast_thresholds or any(not 0 <= x <= 1 for x in a.ast_thresholds)
+            or a.ast_primary_threshold not in a.ast_thresholds
+            or len(set(a.ast_thresholds)) != len(a.ast_thresholds)):
+        p.error('Invalid AST thresholds; primary must be one of sensitivity thresholds')
+    try:
+        a.ast_nicad_band_edges = tuple(Decimal(x) for x in a.ast_nicad_band_edges.split(','))
+    except InvalidOperation:
+        p.error('Invalid NiCad band thresholds')
+    if (len(a.ast_nicad_band_edges) < 2
+            or any(not x.is_finite() for x in a.ast_nicad_band_edges)
+            or a.ast_nicad_band_edges[0] != a.clonetype_max_similarity
+            or a.ast_nicad_band_edges[-1] != a.clonetype_min_similarity
+            or any(a.ast_nicad_band_edges[i] <= a.ast_nicad_band_edges[i+1]
+                   for i in range(len(a.ast_nicad_band_edges)-1))):
+        p.error('NiCad band thresholds must descend from max similarity to minimum')
+    a.ast_nicad_band_labels = (str(a.ast_nicad_band_edges[0]),) + tuple(
+        f'{a.ast_nicad_band_edges[i]}-<{a.ast_nicad_band_edges[i-1]}'
+        for i in range(1, len(a.ast_nicad_band_edges)))
+    if (Path(a.ast_report_name).name != a.ast_report_name
+            or not a.ast_report_name.endswith('.md')):
+        p.error('AST report name must be a basename ending .md')
+    for path in (a.h07_python, a.h08_python, a.ast_impl):
+        if not path.is_relative_to(a.project_root):
+            p.error('AST source path outside project root')
     try:
         ZoneInfo(a.time_zone)
     except Exception as exc:
         p.error(f'Invalid time zone: {exc}')
-    if a.mode in ('inspect', 'summarize'):
+    if a.mode in ('inspect', 'summarize', 'clonetypes', 'clonetypes-smoke'):
         names = subjects(a)
         if a.mode == 'inspect':
             for subject in names:
@@ -489,8 +580,14 @@ def main():
                 print(f'INPUT_PASS subject={subject} after_pairs={manifest["clone_pairs"]}', flush=True)
             print(f'INSPECT_PASS subjects={len(names)} '
                   f'input={a.input_root} source={a.source_root}', flush=True)
-        else:
+        elif a.mode == 'summarize':
             summarize(a, names)
+        else:
+            if a.mode == 'clonetypes-smoke':
+                if a.subject not in names:
+                    fail(f'AST_SMOKE_SUBJECT_NOT_IN_AFTER_INPUT {a.subject}')
+                names = [a.subject]
+            analyze_clonetypes(a, names)
     else:
         names = subjects(a)
         if a.subject not in names:
