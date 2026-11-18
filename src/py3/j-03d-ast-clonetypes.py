@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03d v5 H-07/H-08 AST-based clone type *candidate* census.
+"""J-03d v6 H-07/H-08 AST-based clone type *candidate* census.
 
 Imported by j-03d-positive-clones.py. No configuration defaults or CLI here.
 The standalone Shell supplies every parameter. H-07/H-08 reference sources
@@ -230,7 +230,7 @@ def similarity_band(raw, args):
     raise RuntimeError(f'AST_NICAD_BAND_UNCLASSIFIED value={value}')
 
 
-def classify_subject(args, subject, db, h08, common, run_subject):
+def classify_subject(args, subject, db, h08, common, run_subject, on_pair=None):
     """H-08 precedence and metric definitions on full subject pair stream."""
     @functools.lru_cache(maxsize=args.ast_fragment_cache_size)
     def info(identifier):
@@ -313,6 +313,8 @@ def classify_subject(args, subject, db, h08, common, run_subject):
                 typ = ('STRUCTURAL_UNSCORED' if score is None else
                        'TYPE_3_STRUCTURAL_CANDIDATE' if score >= float(args.ast_primary_threshold)
                        else 'SEMANTIC_UNDETERMINED')
+            if on_pair is not None:
+                on_pair(row, typ, score)
             totals[typ] += 1
             totals['pairs'] += 1
             if len(examples[typ]) < args.ast_sample_per_category:
@@ -396,7 +398,7 @@ def markdown_report(args, results, ast_evidence, timestamp, full):
             t[k].update(v)
     total = sum(r['pairs'] for r in results)
     md = [
-        '# J-03d v5 - AST-based Clone Type Candidate Census',
+        '# J-03d v6 - AST-based Clone Type Candidate Census',
         '',
         f'Generated (America/Chicago): {timestamp}',
         f'Experiment: `{args.experiment}`; analyzer version: `{args.version}`',

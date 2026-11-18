@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03d v5: immutable positive export/verification and H-07/H-08 AST type audit.
+"""J-03d v6: immutable positive export/verification and H-07/H-08 AST type audit.
 
 All experiment configuration is mandatory and supplied by the standalone Shell.
 No input mutation, no negative labels, no train/validation/test partitioning.
@@ -450,6 +450,17 @@ def analyze_clonetypes(args, names):
     module.analyze(args, names, sys.modules[__name__])
 
 
+def prepare_fixed_positives(args, names):
+    """New v6 positive-only selection; verify original inputs before publishing."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('j03d_fixed_positives', args.positive_impl)
+    if spec is None or spec.loader is None:
+        fail(f'POSITIVE_IMPLEMENTATION_MISSING {args.positive_impl}')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.run(args, names, sys.modules[__name__])
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     for flag in ('experiment', 'version', 'mode', 'subject', 'project-root',
@@ -474,16 +485,24 @@ def main():
                  'ast-progress-fragments', 'ast-progress-pairs',
                  'ast-fragment-cache-size', 'ast-score-cache-size',
                  'ast-compression-level', 'ast-sample-per-category',
-                 'ast-report-name', 'ast-nicad-band-edges'):
+                 'ast-report-name', 'ast-nicad-band-edges',
+                 'positive-impl', 'positive-source-census-name', 'positive-source-census-sha256',
+                 'positive-balance-policy', 'positive-balance-types', 'positive-target-type-ratio',
+                 'positive-missing-type-policy', 'positive-type2-blind-min', 'positive-sample-seed',
+                 'positive-dedup-strategy', 'positive-public-name', 'positive-details-dir',
+                 'positive-details-name', 'positive-manifest-name', 'positive-report-name',
+                 'positive-progress-pairs', 'positive-sqlite-cache-kib', 'positive-create-outputs'):
         p.add_argument('--' + flag, required=True)
     a = p.parse_args()
-    for name in ('project_root', 'input_root', 'source_root', 'output_root', 'run_dir', 'h07_python', 'h08_python', 'ast_impl'):
+    for name in ('project_root', 'input_root', 'source_root', 'output_root', 'run_dir', 'h07_python', 'h08_python', 'ast_impl', 'positive_impl'):
         setattr(a, name, Path(getattr(a, name)).resolve())
     for name in ('expected_subjects', 'expected_total_pairs', 'positive_label',
                  'progress_every_fragments', 'progress_every_pairs',
                  'clonetype_progress_every_pairs', 'ast_gram_size', 'ast_max_cells',
                  'ast_progress_fragments', 'ast_progress_pairs', 'ast_fragment_cache_size',
-                 'ast_score_cache_size', 'ast_compression_level', 'ast_sample_per_category'):
+                 'ast_score_cache_size', 'ast_compression_level', 'ast_sample_per_category',
+                 'positive_type2_blind_min', 'positive_sample_seed', 'positive_progress_pairs',
+                 'positive_sqlite_cache_kib'):
         try:
             setattr(a, name, int(getattr(a, name)))
         except ValueError:
@@ -492,7 +511,7 @@ def main():
         p.error('Expected subjects and pair count must be positive; positive label must be 1')
     if a.progress_every_fragments < 1 or a.progress_every_pairs < 1 or a.clonetype_progress_every_pairs < 1:
         p.error('Progress intervals must be positive')
-    if a.mode not in ('inspect', 'export', 'verify', 'summarize', 'clonetypes', 'clonetypes-smoke'):
+    if a.mode not in ('inspect', 'export', 'verify', 'summarize', 'clonetypes', 'clonetypes-smoke', 'positiveclone', 'positiveclone-verify'):
         p.error('Invalid mode')
     if a.mode in ('export', 'verify', 'clonetypes-smoke') and not NAME.fullmatch(a.subject):
         p.error('Invalid subject name')
@@ -565,14 +584,42 @@ def main():
     if (Path(a.ast_report_name).name != a.ast_report_name
             or not a.ast_report_name.endswith('.md')):
         p.error('AST report name must be a basename ending .md')
-    for path in (a.h07_python, a.h08_python, a.ast_impl):
+    for path in (a.h07_python, a.h08_python, a.ast_impl, a.positive_impl):
         if not path.is_relative_to(a.project_root):
             p.error('AST source path outside project root')
+    if a.positive_balance_policy != 'equal_available_types' or a.positive_missing_type_policy != 'equal_present_types_with_warning':
+        p.error('Unsupported positive balance/missing-type policy')
+    if a.positive_dedup_strategy != 'unordered_source_sha256_pair':
+        p.error('Unsupported positive dedup strategy')
+    if a.positive_balance_types != ('TYPE_1_SIGNATURE,TYPE_2_CONSISTENT_SIGNATURE,'
+                                     'TYPE_2_BLIND_SIGNATURE,TYPE_3_STRUCTURAL_CANDIDATE'):
+        p.error('Unexpected positive candidate labels')
+    if a.positive_target_type_ratio != '1,1,1':
+        p.error('Only strict equal Type1:Type2:Type3 supported')
+    if a.positive_type2_blind_min < 0 or a.positive_progress_pairs < 1 or a.positive_sqlite_cache_kib < 64:
+        p.error('Invalid positive sampling configuration')
+    if a.positive_sample_seed < 0:
+        p.error('Positive sample seed cannot be negative')
+    if a.positive_create_outputs != 'true':
+        p.error('Positive output publishing configuration must be true')
+    if not HEX64.fullmatch(a.positive_source_census_sha256):
+        p.error('Invalid positive source census sha256')
+    for key in ('positive_source_census_name', 'positive_public_name', 'positive_details_dir',
+                'positive_details_name', 'positive_manifest_name', 'positive_report_name'):
+        x = getattr(a, key)
+        if not x or x in ('.', '..') or Path(x).name != x or '/' in x or '\\' in x:
+            p.error(f'Invalid positive output basename: {key}')
+    if a.positive_public_name != a.positive_details_name:
+        p.error('Public and detailed JSONL basenames must be identical')
+    if (not a.positive_public_name.endswith('.jsonl')
+            or not a.positive_manifest_name.endswith('.json')
+            or not a.positive_report_name.endswith('.md')):
+        p.error('Invalid positive output file extensions')
     try:
         ZoneInfo(a.time_zone)
     except Exception as exc:
         p.error(f'Invalid time zone: {exc}')
-    if a.mode in ('inspect', 'summarize', 'clonetypes', 'clonetypes-smoke'):
+    if a.mode in ('inspect', 'summarize', 'clonetypes', 'clonetypes-smoke', 'positiveclone', 'positiveclone-verify'):
         names = subjects(a)
         if a.mode == 'inspect':
             for subject in names:
@@ -582,6 +629,8 @@ def main():
                   f'input={a.input_root} source={a.source_root}', flush=True)
         elif a.mode == 'summarize':
             summarize(a, names)
+        elif a.mode in ('positiveclone', 'positiveclone-verify'):
+            prepare_fixed_positives(a, names)
         else:
             if a.mode == 'clonetypes-smoke':
                 if a.subject not in names:
