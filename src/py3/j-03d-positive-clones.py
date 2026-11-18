@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03d v6: immutable positive export/verification and H-07/H-08 AST type audit.
+"""J-03d v7: immutable positive export/verification and H-07/H-08 AST type audit.
 
 All experiment configuration is mandatory and supplied by the standalone Shell.
 No input mutation, no negative labels, no train/validation/test partitioning.
@@ -487,6 +487,7 @@ def main():
                  'ast-compression-level', 'ast-sample-per-category',
                  'ast-report-name', 'ast-nicad-band-edges',
                  'positive-impl', 'positive-source-census-name', 'positive-source-census-sha256',
+                 'positive-layout',
                  'positive-balance-policy', 'positive-balance-types', 'positive-target-type-ratio',
                  'positive-missing-type-policy', 'positive-type2-blind-min', 'positive-sample-seed',
                  'positive-dedup-strategy', 'positive-public-name', 'positive-details-dir',
@@ -511,7 +512,8 @@ def main():
         p.error('Expected subjects and pair count must be positive; positive label must be 1')
     if a.progress_every_fragments < 1 or a.progress_every_pairs < 1 or a.clonetype_progress_every_pairs < 1:
         p.error('Progress intervals must be positive')
-    if a.mode not in ('inspect', 'export', 'verify', 'summarize', 'clonetypes', 'clonetypes-smoke', 'positiveclone', 'positiveclone-verify'):
+    if a.mode not in ('inspect', 'export', 'verify', 'summarize', 'clonetypes', 'clonetypes-smoke', 'positiveclone', 'positiveclone-verify',
+                       'positiveclone-sameratio-type', 'positiveclone-sameratio-type-verify'):
         p.error('Invalid mode')
     if a.mode in ('export', 'verify', 'clonetypes-smoke') and not NAME.fullmatch(a.subject):
         p.error('Invalid subject name')
@@ -587,15 +589,22 @@ def main():
     for path in (a.h07_python, a.h08_python, a.ast_impl, a.positive_impl):
         if not path.is_relative_to(a.project_root):
             p.error('AST source path outside project root')
-    if a.positive_balance_policy != 'equal_available_types' or a.positive_missing_type_policy != 'equal_present_types_with_warning':
-        p.error('Unsupported positive balance/missing-type policy')
+    expected_layout = ('sameratio-type' if a.mode.startswith('positiveclone-sameratio-type') else 'root')
+    expected_policy = ('equal_available_types' if expected_layout=='sameratio-type' else 'all_available_types')
+    expected_ratio = ('1,1,1' if expected_layout=='sameratio-type' else 'native')
+    expected_missing = ('equal_present_types_with_warning' if expected_layout=='sameratio-type' else 'preserve_missing_types_with_warning')
+    if a.mode.startswith('positiveclone') and (a.positive_layout != expected_layout or
+            a.positive_balance_policy != expected_policy or
+            a.positive_target_type_ratio != expected_ratio or
+            a.positive_missing_type_policy != expected_missing):
+        p.error('Positive mode and explicit Shell policies/layout disagree')
     if a.positive_dedup_strategy != 'unordered_source_sha256_pair':
         p.error('Unsupported positive dedup strategy')
     if a.positive_balance_types != ('TYPE_1_SIGNATURE,TYPE_2_CONSISTENT_SIGNATURE,'
                                      'TYPE_2_BLIND_SIGNATURE,TYPE_3_STRUCTURAL_CANDIDATE'):
         p.error('Unexpected positive candidate labels')
-    if a.positive_target_type_ratio != '1,1,1':
-        p.error('Only strict equal Type1:Type2:Type3 supported')
+    if a.positive_target_type_ratio not in ('1,1,1','native') or a.positive_layout not in ('root','sameratio-type'):
+        p.error('Invalid positive type ratio or output layout')
     if a.positive_type2_blind_min < 0 or a.positive_progress_pairs < 1 or a.positive_sqlite_cache_kib < 64:
         p.error('Invalid positive sampling configuration')
     if a.positive_sample_seed < 0:
@@ -619,7 +628,8 @@ def main():
         ZoneInfo(a.time_zone)
     except Exception as exc:
         p.error(f'Invalid time zone: {exc}')
-    if a.mode in ('inspect', 'summarize', 'clonetypes', 'clonetypes-smoke', 'positiveclone', 'positiveclone-verify'):
+    if a.mode in ('inspect', 'summarize', 'clonetypes', 'clonetypes-smoke', 'positiveclone', 'positiveclone-verify',
+                       'positiveclone-sameratio-type', 'positiveclone-sameratio-type-verify'):
         names = subjects(a)
         if a.mode == 'inspect':
             for subject in names:
@@ -629,7 +639,8 @@ def main():
                   f'input={a.input_root} source={a.source_root}', flush=True)
         elif a.mode == 'summarize':
             summarize(a, names)
-        elif a.mode in ('positiveclone', 'positiveclone-verify'):
+        elif a.mode in ('positiveclone', 'positiveclone-verify',
+                       'positiveclone-sameratio-type', 'positiveclone-sameratio-type-verify'):
             prepare_fixed_positives(a, names)
         else:
             if a.mode == 'clonetypes-smoke':

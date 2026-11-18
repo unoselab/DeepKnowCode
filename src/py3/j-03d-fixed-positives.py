@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03d v6: deterministic, content-deduplicated positive-only subject balancing.
+"""J-03d v7: deterministic, content-deduplicated positive-only subject balancing.
 
 Runtime configuration comes only from the standalone J-03d Shell wrapper.
 No negative samples, training splits, or changes to original verified CSV/JSONL.
@@ -247,6 +247,93 @@ def render_outputs(args, subject, rows, fragments, stage):
     return pub,detail,counts
 
 
+def published_paths(args, subject):
+    base=args.output_root/subject
+    rel=(Path('sameratio-type') if args.positive_layout=='sameratio-type' else Path('.'))
+    pub=base/rel/args.positive_public_name
+    detail=base/args.positive_details_dir/rel/args.positive_details_name
+    manifest=base/args.positive_details_dir/rel/args.positive_manifest_name
+    return pub,detail,manifest
+
+
+def selected_quotas(available,args,subject):
+    if args.positive_balance_policy=='all_available_types':
+        warning=[]
+        if available[T1]==0:warning.append('MISSING_TYPE_1')
+        if available[T2C]+available[T2B]==0:warning.append('MISSING_TYPE_2')
+        if available[T3]==0:warning.append('MISSING_TYPE_3')
+        require(sum(available.values())>0, 'POSITIVE_NO_ELIGIBLE_PAIRS subject='+subject)
+        return dict(available),None,warning
+    return quotas_from_counts(available,args,subject)
+
+
+def load_subject_fragments(args,subject,original):
+    # A subject holds at most ~13k fragments in the v5 census; never hold
+    # all ~2.7M selected CSV rows or public JSON objects in memory.
+    path=args.output_root/subject/'fragments.jsonl'
+    indexed={}
+    with path.open(encoding='utf-8') as stream:
+        for line in stream:
+            require(bool(line.strip()),'POSITIVE_EMPTY_FRAGMENT_LINE '+subject)
+            item=json.loads(line)
+            name=item['fragment_id']
+            require(name not in indexed,'POSITIVE_DUPLICATE_FRAGMENT_ID '+name)
+            raw=item['code'].encode(args.code_encoding,errors=args.code_errors)
+            require(original.sha_bytes(raw)==item['source_sha256'],
+                    'POSITIVE_FRAGMENT_HASH_MISMATCH '+name)
+            indexed[name]=item
+    return indexed
+
+
+def render_all_streaming(args,subject,pool,original,stage):
+    # SQL indexed membership lookup: bounded by unique fragment code volume,
+    # NOT by the potentially multi-million selected positive pair population.
+    fragments=load_subject_fragments(args,subject,original)
+    pool.execute('CREATE UNIQUE INDEX candidates_pair_id_unique ON candidates(pair_id)')
+    pool.commit()
+    pub=stage/args.positive_public_name
+    detail=stage/args.positive_details_dir/args.positive_details_name
+    detail.parent.mkdir(mode=0o755,exist_ok=True)
+    counts=Counter(); count=0
+    with pub.open('x',encoding='utf-8') as out_pub, detail.open('x',encoding='utf-8') as out_detail:
+        for row in original.csv_rows(args.output_root/subject/'positive_pairs.csv',set(original.PAIR_FIELDS)|{'label'}):
+            match=pool.execute('SELECT category,score FROM candidates WHERE pair_id=?',
+                               (row['pair_id'],)).fetchone()
+            if match is None: continue
+            typ,score=match
+            a=fragments[row['fragment_a_id']];b=fragments[row['fragment_b_id']]
+            require(row['label']==str(args.positive_label) and
+                    row['repository_a']==row['repository_b']==subject and
+                    row['fragment_a_id']!=row['fragment_b_id'],
+                    'POSITIVE_ROW_INVALID '+row['pair_id'])
+            require(a['source_sha256']==row['source_sha256_a'] and
+                    b['source_sha256']==row['source_sha256_b'],
+                    'POSITIVE_SOURCE_JOIN_MISMATCH '+row['pair_id'])
+            sample_id='pos-'+sha256((subject+'\0'+row['pair_id']).encode()).hexdigest()[:24]
+            ctype='Type 1' if typ==T1 else 'Type 3' if typ==T3 else 'Type 2'
+            common={'sample_id':sample_id,'repository':subject,'clone_type':ctype,
+                    'label':args.positive_label,'code_a':a['code'],'code_b':b['code']}
+            extra={**common,'clone_subtype':typ,'original_pair_id':row['pair_id'],
+                'nicad_similarity_percent':row['nicad_similarity_raw'],
+                'ast_combined_similarity':round(score,8) if score is not None else None,
+                'ast_primary_threshold':str(args.ast_primary_threshold),
+                'detector':row['detector'],'detector_config':row['config'],
+                'source_a':{'fragment_id':a['fragment_id'],'file':a['file_path'],
+                    'start_line':a['start_line'],'end_line':a['end_line'],
+                    'commit':a['commit'],'source_sha256':a['source_sha256']},
+                'source_b':{'fragment_id':b['fragment_id'],'file':b['file_path'],
+                    'start_line':b['start_line'],'end_line':b['end_line'],
+                    'commit':b['commit'],'source_sha256':b['source_sha256']}}
+            out_pub.write(output_line(common));out_detail.write(output_line(extra))
+            count+=1;counts[typ]+=1
+            if count % args.positive_progress_pairs==0:
+                print(f'[{stamp(args)}] POSITIVE_WRITE_PROGRESS subject={subject} '
+                      f'fixed_pairs={count}',flush=True)
+    require(count==pool.execute('SELECT COUNT(*) FROM candidates').fetchone()[0],
+            'POSITIVE_FULL_POOL_COUNT_MISMATCH '+subject)
+    return pub,detail,counts,count
+
+
 def compare_or_publish(src, dst, original):
     require(not dst.is_symlink(), 'POSITIVE_OUTPUT_SYMLINK_FORBIDDEN '+str(dst))
     if dst.exists():
@@ -265,6 +352,7 @@ def compare_or_publish(src, dst, original):
 def manifest_effective(args):
     return {
         'version':args.version,'experiment':args.experiment,
+        'output_layout':args.positive_layout,
         'seed':args.positive_sample_seed,
         'policy':args.positive_balance_policy,
         'target_type_ratio':args.positive_target_type_ratio,
@@ -287,21 +375,43 @@ def manifest_effective(args):
     }
 
 
-def verify_published(args, subject, census, original):
-    dest=args.output_root/subject
-    pub=dest/args.positive_public_name
-    details=dest/args.positive_details_dir/args.positive_details_name
-    manifest=dest/args.positive_details_dir/args.positive_manifest_name
+def verify_published(args,subject,census,original):
+    pub,details,manifest=published_paths(args,subject)
     for path in (pub,details,manifest):
         require(path.is_file() and not path.is_symlink(),
                 'POSITIVE_PUBLISHED_FILE_REQUIRED '+str(path))
     m=original.read_json(manifest)
-    require(m['subject']==subject and m['status']=='FIXED_POSITIVE_ONLY' and
-            m['effective_configuration']==manifest_effective(args),
-            'POSITIVE_MANIFEST_METADATA_MISMATCH '+subject)
-    require(m['census_counts']==census['counts'] and m['original_pairs']==census['pairs'],
+    require(m['subject']==subject and m['status']=='FIXED_POSITIVE_ONLY',
+            'POSITIVE_MANIFEST_STATUS_INVALID '+subject)
+    legacy=(m['version']=='v6')
+    if legacy:
+        # The v6 manifest is intentionally moved without alteration. Its SHA256
+        # keys still reflect the old paths; only its containing directory moved.
+        cfg=m['effective_configuration']
+        require(args.positive_layout=='sameratio-type' and
+                args.positive_balance_policy=='equal_available_types' and
+                cfg['version']=='v6' and cfg['policy']=='equal_available_types' and
+                cfg['target_type_ratio']=='1,1,1' and
+                cfg['missing_type_policy']=='equal_present_types_with_warning' and
+                cfg['public_name']==args.positive_public_name and
+                cfg['details_dir']==args.positive_details_dir and
+                cfg['details_name']==args.positive_details_name and
+                cfg['manifest_name']==args.positive_manifest_name and
+                cfg['census_sha256']==args.positive_source_census_sha256 and
+                cfg['census_name']==args.positive_source_census_name and
+                cfg['dedup_strategy']==args.positive_dedup_strategy and
+                cfg['seed']==args.positive_sample_seed and
+                cfg['primary_ast_threshold']==str(args.ast_primary_threshold) and
+                cfg['type2_blind_min']==args.positive_type2_blind_min,
+                'POSITIVE_MIGRATED_V6_CONFIG_INVALID '+subject)
+    else:
+        require(m['version']==args.version and
+                m['effective_configuration']==manifest_effective(args),
+                'POSITIVE_MANIFEST_CONFIG_MISMATCH '+subject)
+    require(m['census_counts']==census['counts'] and
+            m['original_pairs']==census['pairs'],
             'POSITIVE_MANIFEST_CENSUS_MISMATCH '+subject)
-    source_m=dest/'manifest.json'
+    source_m=args.output_root/subject/'manifest.json'
     require(m['source_manifest_sha256']==original.sha_file(source_m),
             'POSITIVE_SOURCE_MANIFEST_MODIFIED '+subject)
     src=original.read_json(source_m)
@@ -311,67 +421,98 @@ def verify_published(args, subject, census, original):
     require(m['h07_source_sha256']==original.sha_file(args.h07_python) and
             m['h08_source_sha256']==original.sha_file(args.h08_python),
             'POSITIVE_AST_REFERENCE_CHANGED '+subject)
-    expected_selected, _, warnings=quotas_from_counts(m['unique_content_pair_counts'],args,subject)
+    expected_selected,_,warnings=selected_quotas(m['unique_content_pair_counts'],args,subject)
     require(m['selected_counts']==expected_selected and m['warnings']==warnings,
-            'POSITIVE_MANIFEST_BALANCE_QUOTAS_CHANGED '+subject)
+            'POSITIVE_MANIFEST_SELECTION_POLICY_MISMATCH '+subject)
     require(m['files_sha256'][args.positive_public_name]==original.sha_file(pub) and
             m['files_sha256'][args.positive_details_dir+'/'+args.positive_details_name]==original.sha_file(details),
             'POSITIVE_PUBLISHED_SHA256_MISMATCH '+subject)
-    count=0;typecounts=Counter(); ids=set(); codekeys=set()
-    with pub.open(encoding='utf-8') as f1, details.open(encoding='utf-8') as f2:
-        for ln,(p,d) in enumerate(zip(f1,f2,strict=True),1):
-            x=json.loads(p); y=json.loads(d)
-            require(x['sample_id']==y['sample_id'] and x['repository']==subject and
-                    x['label']==args.positive_label and x['clone_type'] in ('Type 1','Type 2','Type 3'),
-                    'POSITIVE_OUTPUT_JOIN_INVALID '+subject+':'+str(ln))
-            for key in ('code_a','code_b','clone_type'):
-                require(x[key]==y[key], 'POSITIVE_PUBLIC_DETAIL_MISMATCH '+subject+':'+str(ln))
-            hashes=tuple(sorted((original.sha_bytes(x['code_a'].encode(args.code_encoding,errors=args.code_errors)),
-                                 original.sha_bytes(x['code_b'].encode(args.code_encoding,errors=args.code_errors)))))
-            require(hashes==(tuple(sorted((y['source_a']['source_sha256'],y['source_b']['source_sha256'])))),
-                    'POSITIVE_OUTPUT_CODE_HASH_MISMATCH '+subject+':'+str(ln))
-            require(x['sample_id'] not in ids and hashes not in codekeys,
-                    'POSITIVE_OUTPUT_DUPLICATE_PAIR '+subject+':'+str(ln))
-            ids.add(x['sample_id']);codekeys.add(hashes)
-            require(y['clone_subtype'] in CATEGORIES,'POSITIVE_OUTPUT_BAD_SUBTYPE')
-            expected_type = ('Type 1' if y['clone_subtype']==T1 else
-                             'Type 3' if y['clone_subtype']==T3 else 'Type 2')
-            require(x['clone_type']==expected_type,'POSITIVE_OUTPUT_TYPE_INCONSISTENCY')
-            typecounts[y['clone_subtype']]+=1;count+=1
-    require(count==m['fixed_positive_pairs'] and dict(typecounts)=={k:v for k,v in m['selected_counts'].items() if v},
+    counts=Counter();n=0
+    # SQLite-backed verification to avoid keeping millions of pair hashes/IDs
+    # in Python memory for the unbalanced full-coverage mode.
+    verify_path=args.run_dir/('positive_verify_'+subject+'.sqlite')
+    require(not verify_path.exists(),'POSITIVE_VERIFY_DB_ALREADY_EXISTS '+str(verify_path))
+    verify_db=sqlite3.connect(verify_path)
+    try:
+        verify_db.execute('CREATE TABLE verified (pair_key TEXT PRIMARY KEY, sample_id TEXT UNIQUE)')
+        with pub.open(encoding='utf-8') as f1,details.open(encoding='utf-8') as f2:
+            for ln,(p,d) in enumerate(zip(f1,f2,strict=True),1):
+                x=json.loads(p);y=json.loads(d)
+                require(x['sample_id']==y['sample_id'] and x['repository']==y['repository']==subject and
+                        x['label']==y['label']==args.positive_label and
+                        x['clone_type'] in ('Type 1','Type 2','Type 3'),
+                        'POSITIVE_OUTPUT_JOIN_INVALID '+subject+':'+str(ln))
+                for key in ('code_a','code_b','clone_type'):
+                    require(x[key]==y[key],
+                            'POSITIVE_PUBLIC_DETAIL_MISMATCH '+subject+':'+str(ln))
+                hashes=tuple(sorted((original.sha_bytes(x['code_a'].encode(args.code_encoding,errors=args.code_errors)),
+                                     original.sha_bytes(x['code_b'].encode(args.code_encoding,errors=args.code_errors)))))
+                require(hashes==tuple(sorted((y['source_a']['source_sha256'],
+                                              y['source_b']['source_sha256']))),
+                        'POSITIVE_OUTPUT_CODE_HASH_MISMATCH '+subject+':'+str(ln))
+                code_key=hashes[0]+':'+hashes[1]
+                try:
+                    verify_db.execute('INSERT INTO verified VALUES (?,?)',(code_key,x['sample_id']))
+                except sqlite3.IntegrityError as e:
+                    raise RuntimeError('POSITIVE_OUTPUT_DUPLICATE_PAIR '+subject+':'+str(ln)) from e
+                require(y['clone_subtype'] in CATEGORIES,'POSITIVE_OUTPUT_BAD_SUBTYPE')
+                expected_type=('Type 1' if y['clone_subtype']==T1 else
+                               'Type 3' if y['clone_subtype']==T3 else 'Type 2')
+                require(x['clone_type']==expected_type,'POSITIVE_OUTPUT_TYPE_INCONSISTENCY')
+                counts[y['clone_subtype']]+=1;n+=1
+                if n%args.positive_progress_pairs==0:
+                    verify_db.commit()
+                    print(f'[{stamp(args)}] POSITIVE_VERIFY_PROGRESS subject={subject} pairs={n}',flush=True)
+        verify_db.commit()
+    finally:
+        verify_db.close()
+        if verify_path.is_file():verify_path.unlink()
+    require(n==m['fixed_positive_pairs'] and
+            dict(counts)=={k:v for k,v in expected_selected.items() if v},
             'POSITIVE_OUTPUT_COUNTS_MISMATCH '+subject)
-    require(count == m['fixed_type1'] + m['fixed_type2_total'] + m['fixed_type3'] and
-            m['fixed_type2_total'] == m['selected_counts'][T2C]+m['selected_counts'][T2B],
+    require(n==m['fixed_type1']+m['fixed_type2_total']+m['fixed_type3'] and
+            m['fixed_type2_total']==expected_selected[T2C]+expected_selected[T2B],
             'POSITIVE_OUTPUT_SUBTOTAL_MISMATCH '+subject)
-    if m['type_balance_status']=='ALL_THREE_TYPES_BALANCED':
-        require(m['fixed_type1']==m['fixed_type2_total']==m['fixed_type3'],
-                'POSITIVE_TYPE_BALANCE_MISMATCH '+subject)
+    if args.positive_balance_policy=='equal_available_types':
+        if m['type_balance_status']=='ALL_THREE_TYPES_BALANCED':
+            require(m['fixed_type1']==m['fixed_type2_total']==m['fixed_type3'],
+                    'POSITIVE_TYPE_BALANCE_MISMATCH '+subject)
+        else:
+            require(m['type_balance_status']=='MISSING_TYPE_1_BALANCED_T2_T3' and
+                    m['fixed_type1']==0 and m['fixed_type2_total']==m['fixed_type3'],
+                    'POSITIVE_MISSING_TYPE_BALANCE_INVALID '+subject)
     else:
-        require(m['type_balance_status']=='MISSING_TYPE_1_BALANCED_T2_T3' and
-                m['fixed_type1']==0 and m['fixed_type2_total']==m['fixed_type3'],
-                'POSITIVE_MISSING_TYPE_BALANCE_INVALID '+subject)
+        require(m['type_balance_status']=='NATIVE_TYPE_RATIOS_PRESERVED' and
+                m['selected_counts']==m['unique_content_pair_counts'],
+                'POSITIVE_NATIVE_RATIO_NOT_PRESERVED '+subject)
     print(f'[{stamp(args)}] POSITIVE_VERIFY_PASS subject={subject} '
-          f'original={census["pairs"]} fixed={count} '
-          f'T1={m["fixed_type1"]} T2={m["fixed_type2_total"]} T3={m["fixed_type3"]}',flush=True)
+          f'original={census["pairs"]} fixed={n} T1={m["fixed_type1"]} '
+          f'T2={m["fixed_type2_total"]} T3={m["fixed_type3"]} '
+          f'policy={args.positive_balance_policy} legacy_v6={legacy}',flush=True)
     return m
 
 
-def classify_and_prepare(args, subject, census, original, ast, parser, h07, h08, runroot):
+def classify_and_prepare(args,subject,census,original,ast,parser,h07,h08,runroot):
     original_manifest=original.verify_output(args,subject)
-    output_dir=args.output_root/subject
-    published=[output_dir/args.positive_public_name,
-               output_dir/args.positive_details_dir/args.positive_details_name,
-               output_dir/args.positive_details_dir/args.positive_manifest_name]
-    existing=[p.exists() or p.is_symlink() for p in published]
+    source_root=args.output_root/subject
+    pub_out,detail_out,manifest_out=published_paths(args,subject)
+    published=(pub_out,detail_out,manifest_out)
+    existing=[x.exists() or x.is_symlink() for x in published]
     if all(existing):
+        # An old v6 root file cannot be reinterpreted as the new full-coverage mode.
+        if args.positive_layout=='root':
+            old=original.read_json(manifest_out)
+            require(old.get('version')!='v6',
+                    'POSITIVE_MIGRATION_REQUIRED: move the v6 public/detail/manifest files '
+                    'to sameratio-type/ before executing new --positiveclone')
         print(f'[{stamp(args)}] POSITIVE_ALREADY_PRESENT_VERIFY subject={subject}',flush=True)
         return verify_published(args,subject,census,original)
-    require(not any(existing), 'POSITIVE_INCOMPLETE_EXISTING_ARTIFACTS_REVIEW_REQUIRED subject='+subject)
+    require(not any(existing),
+            'POSITIVE_INCOMPLETE_EXISTING_ARTIFACTS_REVIEW_REQUIRED subject='+subject)
     runsubject=runroot/subject
     runsubject.mkdir(mode=0o755)
     pool=make_pool(runsubject/'positive_pool.sqlite',args)
-    db=None
-    start=time.monotonic()
+    db=None;start=time.monotonic()
     try:
         db,fragcounts,failures,features_sha=ast.build_features(
             args,subject,parser,h07,runsubject,original_manifest)
@@ -381,22 +522,28 @@ def classify_and_prepare(args, subject, census, original, ast, parser, h07, h08,
                 'POSITIVE_AST_V5_CENSUS_MISMATCH subject='+subject+' expected='+
                 repr(census['counts'])+' actual='+repr(counts['counts']))
         with (runsubject/'subject_summary.json').open('x',encoding='utf-8') as f:
-            json.dump(counts,f,sort_keys=True,indent=2,ensure_ascii=True)
-            f.write('\n')
+            json.dump(counts,f,sort_keys=True,indent=2,ensure_ascii=True);f.write('\n')
         pool.commit()
         unique=Counter(dict(pool.execute('SELECT category,COUNT(*) FROM candidates GROUP BY category')))
         available={c:unique[c] for c in CATEGORIES}
-        selected_counts,q,warnings=quotas_from_counts(available,args,subject)
-        selected=choose_pairs(pool,selected_counts)
+        selected_counts,q,warnings=selected_quotas(available,args,subject)
         print(f'[{stamp(args)}] POSITIVE_POOL_PASS subject={subject} '
               f'raw_candidates={sum(census["counts"][c] for c in CATEGORIES)} '
               f'unique_candidates={sum(available.values())} '
-              f'fixed={len(selected)} min_class_quota={q} missing={warnings}',flush=True)
-        rows, fragments=load_selected_rows(args,subject,selected,original)
-        pub,detail,finalcounts=render_outputs(args,subject,rows,fragments,runsubject)
-        require(all(finalcounts[k]==selected_counts[k] for k in CATEGORIES),
+              f'expected_fixed={sum(selected_counts.values())} '
+              f'policy={args.positive_balance_policy} min_class_quota={q} missing={warnings}',
+              flush=True)
+        if args.positive_balance_policy=='all_available_types':
+            pub,detail,finalcounts,total=render_all_streaming(
+                args,subject,pool,original,runsubject)
+        else:
+            selected=choose_pairs(pool,selected_counts)
+            rows,fragments=load_selected_rows(args,subject,selected,original)
+            pub,detail,finalcounts=render_outputs(args,subject,rows,fragments,runsubject)
+            total=len(rows)
+        require(total==sum(selected_counts.values()) and
+                all(finalcounts[k]==selected_counts[k] for k in CATEGORIES),
                 'POSITIVE_FINAL_CATEGORY_COUNT_MISMATCH '+subject)
-        source_root=args.output_root/subject
         src=original.read_json(source_root/'manifest.json')
         record={
             'experiment':args.experiment,'version':args.version,'subject':subject,
@@ -410,42 +557,38 @@ def classify_and_prepare(args, subject, census, original, ast, parser, h07, h08,
             'fixed_type1':selected_counts[T1],
             'fixed_type2_total':selected_counts[T2C]+selected_counts[T2B],
             'fixed_type3':selected_counts[T3],
-            'fixed_positive_pairs':len(rows),
-            'type_balance_status':('ALL_THREE_TYPES_BALANCED' if not warnings else
+            'fixed_positive_pairs':total,
+            'type_balance_status':('NATIVE_TYPE_RATIOS_PRESERVED' if
+                                   args.positive_balance_policy=='all_available_types' else
+                                   'ALL_THREE_TYPES_BALANCED' if not warnings else
                                    'MISSING_TYPE_1_BALANCED_T2_T3'),
-            'warnings':warnings,
-            'fragment_count':fragcounts['fragments'],
-            'eligible_fragments':fragcounts['eligible'],
-            'parse_failure_reasons':failures,
+            'warnings':warnings,'fragment_count':fragcounts['fragments'],
+            'eligible_fragments':fragcounts['eligible'],'parse_failure_reasons':failures,
             'source_manifest_sha256':original.sha_file(source_root/'manifest.json'),
             'source_pairs_sha256':src['files_sha256']['positive_pairs.csv'],
             'source_fragments_sha256':src['files_sha256']['fragments.jsonl'],
             'h07_source_sha256':original.sha_file(args.h07_python),
             'h08_source_sha256':original.sha_file(args.h08_python),
-            'files_sha256':{
-                args.positive_public_name:original.sha_file(pub),
-                args.positive_details_dir+'/'+args.positive_details_name:original.sha_file(detail),
-            },
+            'files_sha256':{args.positive_public_name:original.sha_file(pub),
+                            args.positive_details_dir+'/'+args.positive_details_name:original.sha_file(detail)},
             'duration_seconds':round(time.monotonic()-start,3),
             'stage_fragment_features_sha256':features_sha,
         }
         manifest_stage=runsubject/args.positive_details_dir/args.positive_manifest_name
         with manifest_stage.open('x',encoding='utf-8') as f:
-            json.dump(record,f,ensure_ascii=True,sort_keys=True,indent=2)
-            f.write('\n')
-        dest_details=source_root/args.positive_details_dir
-        require(not dest_details.is_symlink(),'POSITIVE_UNSAFE_DETAILS_DIRECTORY '+str(dest_details))
-        dest_details.mkdir(exist_ok=True)
-        for x,y in ((pub,source_root/args.positive_public_name),
-                    (detail,dest_details/args.positive_details_name),
-                    (manifest_stage,dest_details/args.positive_manifest_name)):
-            compare_or_publish(x,y,original)
+            json.dump(record,f,ensure_ascii=True,sort_keys=True,indent=2);f.write('\n')
+        for parent in (pub_out.parent,detail_out.parent,manifest_out.parent):
+            require(not parent.is_symlink(),'POSITIVE_UNSAFE_OUTPUT_DIRECTORY '+str(parent))
+            parent.mkdir(parents=True,exist_ok=True)
+        for source,dest in ((pub,pub_out),(detail,detail_out),(manifest_stage,manifest_out)):
+            compare_or_publish(source,dest,original)
         return verify_published(args,subject,census,original)
     finally:
         if db is not None:db.close()
         pool.close()
-        for p in (runsubject/'feature_index.sqlite',runsubject/'positive_pool.sqlite'):
-            if p.is_file():p.unlink()
+        for filename in ('feature_index.sqlite','positive_pool.sqlite'):
+            candidate=runsubject/filename
+            if candidate.is_file():candidate.unlink()
 
 
 def fixed_width_table(head, rows):
@@ -474,33 +617,43 @@ def report(args, names, manifests, census, original):
     rows_b=[(r[0],*(fmt(x) for x in r[1:5]),r[5]) for r in status]
     complete=sum(not manifests[n]['warnings'] for n in names)
     rows_b.append(('TOTAL',*(fmt(x) for x in u_total),f'{complete}/{len(names)} 3-Type'))
+    natural=args.positive_balance_policy=='all_available_types'
+    policy_lines=(
+        ['- Preserve every unique Type 1, Type 2 (Consistent/Blind), Type 3 Candidate.',
+         '- No per-Type ratio quota: use each subject\'s natural structural clone distribution.',
+         '- Unique pair counts after code-content deduplication equal the published N-pos.']
+        if natural else
+        ['- Equal Type 1:Type 2:Type 3 within each subject where all types exist.',
+         '- Missing Type 1: preserve Type 2:Type 3 = 1:1 and flag the limitation.',
+         '- Verified migrated v6 manifests keep their original bytes and SHA256.'])
     text='\n'.join([
-        '# J-03d v6 — Subject-wise Fixed Positive Clone Pairs',
+        f'# J-03d {args.version} — '+('Full-coverage Fixed Positive Clone Pairs' if natural else
+                                 'Same-ratio-type Fixed Positive Clone Pairs'),
         '',f'Generated (America/Chicago): {stamp(args)}',
+        f'Command: `--{args.mode}`; Policy: `{args.positive_balance_policy}`; Layout: `{args.positive_layout}`',
         f'Reference census: `{args.positive_source_census_name}` (SHA256 `{args.positive_source_census_sha256}`)',
         f'Subjects: **{len(names)}**; original NiCad positives: **{fmt(total[0])}**; '
         f'fixed positive pairs: **{fmt(total[-1])}**.',
         '', '## Selection policy', '',
-        '- Type 1, Type 2 (Consistent+Blind), Type 3 candidates only; no Type 4 or Undetermined.',
-        '- De-duplicate unordered exact **source code content** pairs before sampling.',
-        '- Equal Type 1:Type 2:Type 3 per subject where all three types exist.',
-        '- For missing Type 1, balance available Type 2:Type 3 1:1 and flag the limitation.',
-        '- Deterministic seed and hash-ranked selection; retain Type 2 subtypes.',
-        '- These are NiCad-positive structural clone candidates, not semantic-certified labels.',
-        '- This stage creates NO negatives and NO train/valid/test splits.',
+        '- Only Type 1/2/3 candidates; excludes Type 4, Undetermined, Unscored, Ineligible.',
+        '- Remove exact source-code-content duplicate pairs (unordered SHA256 pair).',
+        *policy_lines,
+        '- Preserve Type 2 Consistent/Blind subtypes, with Type 2 Total as subtotal.',
+        '- These are NiCad-positive structural candidates, not certified semantic gold labels.',
+        '- This stage generates NO negative examples or train/valid/test splits.',
         '', '## A. Fixed structural positive clone pairs', '',
         'T2-C = Type 2 Consistent; T2-B = Type 2 Blind; T2-All = Type 2 total (subtotal).',
         '',fixed_width_table(('Subject','Orig','T1','T2-C','T2-B','T2-All','T3','N-pos'),rows_a),
         '', '## B. Unique candidate pool and missing-type status', '',
-        'Unique-T1/T2/T3 are counts **after** duplicate source-code pair removal; DupRm is removed candidate pairs.',
+        'Unique-T1/T2/T3 are counts after content-pair deduplication; DupRm = removed duplicate candidates.',
         '',fixed_width_table(('Subject','Unique-T1','Unique-T2','Unique-T3','DupRm','Type status'),rows_b),
         '', '## Verification / next phases', '',
-        '- Original CSV/JSONL and all previous manifests and clone-type reports remain immutable.',
-        '- Per-subject public JSONL, detailed JSONL, and immutable manifest are verified by SHA256.',
-        '- Subject-wise N-pos is fixed only for **this v6 balanced positive selection**.',
-        '- Future negative generation must produce N-neg = N-pos for every subject without label overlap.',
-        '- Future split design must prevent fragment and connected-component leakage; NOT completed here.',
-        '- Public redistribution of source code requires reviewing upstream software licenses.',
+        '- Existing input CSV/JSONL/manifests and older versioned reports stay unchanged.',
+        '- Public/detailed JSONL and their manifest are verified by SHA256 and structural count checks.',
+        '- N-pos is fixed independently by Subject and this policy; no Subject merging.',
+        '- A later phase must satisfy N-neg=N-pos per Subject and check label overlap.',
+        '- Separate future train/validation/test split must prevent Function/Clone Component Leakage.',
+        '- Check upstream source licenses/attribution before public redistribution.',
         '' ])
     return text
 
@@ -511,7 +664,7 @@ def run(args, names, original):
     runroot=args.run_dir/'fixed_positive'
     runroot.mkdir(mode=0o755)
     results={}
-    if args.mode=='positiveclone':
+    if args.mode in ('positiveclone','positiveclone-sameratio-type'):
         # Type classification is recomputed from immutable fragments, not inferred
         # from NiCad similarity and not silently treated as certified ground truth.
         ast_spec=importlib.util.spec_from_file_location('j03d_ast_for_positive',args.ast_impl)
@@ -544,13 +697,13 @@ def run(args, names, original):
              'report_sha256':original.sha_file(perrun),
              'per_subject':[{'subject':n,'fixed_positive_pairs':results[n]['fixed_positive_pairs'],
                               'type_balance_status':results[n]['type_balance_status'],
-                              'manifest_sha256':original.sha_file(args.output_root/n/args.positive_details_dir/args.positive_manifest_name)}
+                              'manifest_sha256':original.sha_file(published_paths(args,n)[2])}
                              for n in names]}
     final=args.run_dir/'fixed_positive_summary.json'
     with final.open('x',encoding='utf-8') as f:
         json.dump(summary,f,indent=2,sort_keys=True,ensure_ascii=True); f.write('\n')
     canonical=args.output_root/args.positive_report_name
-    if args.mode=='positiveclone':
+    if args.mode in ('positiveclone','positiveclone-sameratio-type'):
         # The timestamp-free normalized content can be reproduced and reused.
         if canonical.exists():
             require(not canonical.is_symlink(),'POSITIVE_REPORT_SYMLINK')
