@@ -1,10 +1,50 @@
 #!/usr/bin/env bash
-# DeepKnowCode J-03e v1 - independent shell configuration, execution and Chicago logging.
-# Run from repository root, or by absolute path from elsewhere.
+# =============================================================================
+# DeepKnowCode J-03e v2 - Negative Clone Candidate Pair Preparation
+# =============================================================================
+# Run from the DeepKnowCode repository root. Install the matching J-03e v2
+# Python implementation first. Source J-03d v8 positives remain READ-ONLY.
+#
+# 0. Prerequisite: 47 J-03d v8 subjects and summary are present under
+#    data/clone-detection/3pos-clones/; tree-sitter and tree-sitter-java
+#    versions match the configuration below.
+#
+# 1. Check available modes and usage (no dataset changes):
+#    bash src/sh3/j-03e-negative-clones.sh --help
+#
+# 2. Optional feasibility smoke checks for a small and a large subject:
+#    bash src/sh3/j-03e-negative-clones.sh --negativeclone-feasibility --subject apache__ant
+#    bash src/sh3/j-03e-negative-clones.sh --negativeclone-feasibility --subject apache__ignite
+#
+# 3. Estimate feasibility for ALL 47 subjects (does not publish negatives):
+#    bash src/sh3/j-03e-negative-clones.sh --negativeclone-feasibility
+#
+# 4. Generate N-neg = N-pos per subject, strictly AST similarity < 0.20:
+#    bash src/sh3/j-03e-negative-clones.sh --negativeclone
+#
+# 5. Independently verify all subject negative outputs and their manifests:
+#    bash src/sh3/j-03e-negative-clones.sh --negativeclone-verify
+#
+# Optional per-subject generation and verification (useful for smoke/resume):
+#    bash src/sh3/j-03e-negative-clones.sh --negativeclone --subject apache__ant
+#    bash src/sh3/j-03e-negative-clones.sh --negativeclone-verify --subject apache__ant
+#
+# Input : data/clone-detection/3pos-clones/{subject}/
+# Output: data/clone-detection/4neg-clones/{subject}/
+# Logs  : logs/j-03e/                  (unique America/Chicago timestamps)
+# Runs  : results/j-03e/               (diagnostics and per-run summaries)
+#
+# IMPORTANT:
+# - Feasibility is a probe, NOT a guarantee of N-neg capacity.
+# - No lowering of the 0.20 threshold or silent replacement of failed pairs.
+# - Generated negatives are structural candidates, NOT verified semantic gold.
+# - All experiment parameters are configured here and passed to Python via CLI.
+# - Existing J-03d positives and completed outputs are not overwritten.
+# =============================================================================
 set -Eeuo pipefail
 
 EXPERIMENT="j-03e"
-VERSION="v1"
+VERSION="v2"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN="python3"
 PYTHON_SCRIPT="$ROOT/src/py3/j-03e-negative-clones.py"
@@ -12,7 +52,7 @@ POSITIVE_ROOT="$ROOT/data/clone-detection/3pos-clones"
 NEGATIVE_ROOT="$ROOT/data/clone-detection/4neg-clones"
 RESULT_ROOT="$ROOT/results/j-03e"
 LOG_DIR="$ROOT/logs/j-03e"
-LOG_PREFIX="j-03e-v1-negative-clones"
+LOG_PREFIX="j-03e-v2-negative-clones"
 LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S-%N"
 LOG_TEE_APPEND="true"
 TIME_ZONE="America/Chicago"
@@ -61,7 +101,7 @@ PUBLIC_NAME="fixed_negative_clonepairs.jsonl"
 DETAIL_DIR="details"
 DETAIL_NAME="fixed_negative_clonepairs.jsonl"
 MANIFEST_NAME="fixed_negative_clonepairs.manifest.json"
-REPORT_NAME="summary-fixed-negative-clonepairs-v1.md"
+REPORT_NAME="summary-fixed-negative-clonepairs-v2.md"
 
 usage() {
   cat <<'USAGE'
@@ -69,7 +109,7 @@ Usage:
   bash src/sh3/j-03e-negative-clones.sh --negativeclone-feasibility [--subject SUBJECT]
   bash src/sh3/j-03e-negative-clones.sh --negativeclone [--subject SUBJECT]
   bash src/sh3/j-03e-negative-clones.sh --negativeclone-verify [--subject SUBJECT]
-J-03e v1 never changes the 3pos-clones inputs. Outputs require AST score < 0.20.
+J-03e v2 never changes the 3pos-clones inputs. Outputs require AST score < 0.20.
 USAGE
 }
 

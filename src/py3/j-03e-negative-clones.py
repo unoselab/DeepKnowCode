@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03e v1: per-subject AST-low-similarity negative *candidates*, never semantic gold.
+"""J-03e v2: per-subject AST-low-similarity negative *candidates*, never semantic gold.
 
 All experiment configuration must be passed by the shell. No data is changed in 3pos-clones.
 """
@@ -81,7 +81,7 @@ def parser_args():
         setattr(a,n,Path(getattr(a,n)).expanduser().resolve())
     need(a.mode in ('negativeclone-feasibility','negativeclone','negativeclone-verify'),'INVALID_MODE')
     need(a.time_zone=='America/Chicago','TIMEZONE_MISMATCH')
-    need(a.experiment=='j-03e' and a.version=='v1','EXPERIMENT_VERSION_MISMATCH')
+    need(a.experiment=='j-03e' and a.version=='v2','EXPERIMENT_VERSION_MISMATCH')
     need(a.positive_label==1 and a.negative_label==0,'LABEL_CONFIGURATION_INVALID')
     need(a.positive_policy=='all_available_types' and a.positive_schema=='function_refs_v8',
          'POSITIVE_INPUT_POLICY_OR_SCHEMA_UNEXPECTED')
@@ -605,7 +605,7 @@ def write_summary(a,results,subject_targets):
     p=a.run_dir/filename
     with p.open('x',encoding='utf-8') as f:json.dump(summary,f,indent=2,sort_keys=True);f.write('\n')
     if a.mode!='negativeclone-feasibility':
-        md=['# J-03e v1 — Fixed Negative Clone Candidates','',
+        md=['# J-03e v2 — Fixed Negative Clone Candidates','',
             f'Generated (America/Chicago): {clock(a)}','',
             f'Command: `--{a.mode}`','',
             f'Subjects in this run: {len(results)}','',
