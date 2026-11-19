@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03d v7: immutable positive export/verification and H-07/H-08 AST type audit.
+"""J-03d v8: immutable positive export/verification and H-07/H-08 AST type audit.
 
 All experiment configuration is mandatory and supplied by the standalone Shell.
 No input mutation, no negative labels, no train/validation/test partitioning.
@@ -492,7 +492,8 @@ def main():
                  'positive-missing-type-policy', 'positive-type2-blind-min', 'positive-sample-seed',
                  'positive-dedup-strategy', 'positive-public-name', 'positive-details-dir',
                  'positive-details-name', 'positive-manifest-name', 'positive-report-name',
-                 'positive-progress-pairs', 'positive-sqlite-cache-kib', 'positive-create-outputs'):
+                 'positive-progress-pairs', 'positive-sqlite-cache-kib', 'positive-create-outputs',
+                 'positive-record-schema', 'positive-function-id-source-field'):
         p.add_argument('--' + flag, required=True)
     a = p.parse_args()
     for name in ('project_root', 'input_root', 'source_root', 'output_root', 'run_dir', 'h07_python', 'h08_python', 'ast_impl', 'positive_impl'):

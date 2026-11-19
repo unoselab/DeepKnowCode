@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DeepKnowCode J-03d v7 - Positive Clones + H-07/H-08 AST Type Audit
+# DeepKnowCode J-03d v8 - Positive Clones + H-07/H-08 AST Type Audit
 # =============================================================================
 # Run from the DeepKnowCode project root in this order:
 #
@@ -43,7 +43,7 @@ set -Eeuo pipefail
 
 # --------------------------- Experiment configuration -----------------------
 EXPERIMENT="j-03d"
-VERSION="v7"
+VERSION="v8"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 EXPECTED_INPUT_RELATIVE="data/clone-detection/2after-preproc"
 EXPECTED_OUTPUT_RELATIVE="data/clone-detection/3pos-clones"
@@ -73,7 +73,7 @@ CODE_ERRORS="surrogateescape"
 PROGRESS_EVERY_FRAGMENTS=10000
 PROGRESS_EVERY_PAIRS=50000
 # Accept immutable v2/v3/v4 datasets; only missing exports will carry v5 manifests.
-ACCEPTED_OUTPUT_VERSIONS="v2,v3,v4,v5,v6,v7"
+ACCEPTED_OUTPUT_VERSIONS="v2,v3,v4,v5,v6,v7,v8"
 # Legacy v3 similarity-only parameters are retained for compatibility with the
 # immutable v2/v3 positive dataset and their effective configuration.
 CLONETYPE_T1_LABEL="T1_EXACT_PREPROC_PROXY"
@@ -103,8 +103,8 @@ AST_SAMPLE_PER_CATEGORY=4
 AST_NICAD_BAND_EDGES="100,95,90,80,70"
 # Preserve both v3 summary-clonetype.md and v4 summary-clonetype-h08-v4.md.
 # v5 report is fixed-width, split into two compact tables; T2 total is a subtotal.
-AST_REPORT_NAME="summary-clonetype-h08-v7.md"
-# J-03d v7 dual positive selection; v5 census is immutable reference.
+AST_REPORT_NAME="summary-clonetype-h08-v8.md"
+# J-03d v8 dual positive selection; v5 census is immutable reference.
 POSITIVE_IMPL="$ROOT/src/py3/j-03d-fixed-positives.py"
 POSITIVE_SOURCE_CENSUS_NAME="summary-clonetype-h08-v5.md"
 POSITIVE_SOURCE_CENSUS_SHA256="f510a87fee06c4759b7c2d1b61a4e467cf28f51fe949488dd3a9d083e15f5b1e"
@@ -115,11 +115,13 @@ POSITIVE_MISSING_TYPE_POLICY="preserve_missing_types_with_warning"
 POSITIVE_TYPE2_BLIND_MIN=1
 POSITIVE_SAMPLE_SEED=20261118
 POSITIVE_DEDUP_STRATEGY="unordered_source_sha256_pair"
+POSITIVE_RECORD_SCHEMA="function_refs_v8"
+POSITIVE_FUNCTION_ID_SOURCE_FIELD="fragment_id"
 POSITIVE_PUBLIC_NAME="fixed_positive_clonepairs.jsonl"
 POSITIVE_DETAILS_DIR="details"
 POSITIVE_DETAILS_NAME="fixed_positive_clonepairs.jsonl"
 POSITIVE_MANIFEST_NAME="fixed_positive_clonepairs.manifest.json"
-POSITIVE_REPORT_NAME="summary-fixed-positive-clonepairs-v7.md"
+POSITIVE_REPORT_NAME="summary-fixed-positive-clonepairs-v8.md"
 POSITIVE_LAYOUT="root"
 POSITIVE_PROGRESS_PAIRS=100000
 POSITIVE_SQLITE_CACHE_KIB=32768
@@ -131,19 +133,19 @@ case "${1:-}" in
     POSITIVE_TARGET_TYPE_RATIO="1,1,1"
     POSITIVE_MISSING_TYPE_POLICY="equal_present_types_with_warning"
     POSITIVE_LAYOUT="sameratio-type"
-    POSITIVE_REPORT_NAME="summary-fixed-positive-clonepairs-sameratio-type-v7.md"
+    POSITIVE_REPORT_NAME="summary-fixed-positive-clonepairs-sameratio-type-v8.md"
     ;;
   --positiveclone|--positiveclone-verify)
     POSITIVE_BALANCE_POLICY="all_available_types"
     POSITIVE_TARGET_TYPE_RATIO="native"
     POSITIVE_MISSING_TYPE_POLICY="preserve_missing_types_with_warning"
     POSITIVE_LAYOUT="root"
-    POSITIVE_REPORT_NAME="summary-fixed-positive-clonepairs-v7.md"
+    POSITIVE_REPORT_NAME="summary-fixed-positive-clonepairs-v8.md"
     ;;
 esac
 # ----------------------------- Logging configuration ------------------------
 LOG_DIR="$ROOT/logs/j-03d"
-LOG_PREFIX="j-03d-v7-positive-clones"
+LOG_PREFIX="j-03d-v8-positive-clones"
 LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S-%6N"
 LOG_TIME_ZONE="America/Chicago"
 LOG_TEE_APPEND="true"
@@ -255,6 +257,8 @@ COMMON=(
   --positive-type2-blind-min "$POSITIVE_TYPE2_BLIND_MIN"
   --positive-sample-seed "$POSITIVE_SAMPLE_SEED"
   --positive-dedup-strategy "$POSITIVE_DEDUP_STRATEGY"
+  --positive-record-schema "$POSITIVE_RECORD_SCHEMA"
+  --positive-function-id-source-field "$POSITIVE_FUNCTION_ID_SOURCE_FIELD"
   --positive-public-name "$POSITIVE_PUBLIC_NAME"
   --positive-details-dir "$POSITIVE_DETAILS_DIR"
   --positive-details-name "$POSITIVE_DETAILS_NAME"
@@ -297,7 +301,7 @@ subjects() {
 }
 
 echo "[$(now)] START experiment=$EXPERIMENT version=$VERSION mode=$MODE run=$RUN_DIR log=$LOG_FILE"
-echo "[$(now)] CONFIG input=$INPUT_ROOT input_phase=$EXPECTED_INPUT_PHASE source=$SOURCE_ROOT output=$OUTPUT_ROOT expected_subjects=$EXPECTED_SUBJECTS expected_pairs=$EXPECTED_TOTAL_PAIRS detector=$EXPECTED_DETECTOR config=$EXPECTED_NICAD_CONFIG threshold=$EXPECTED_NICAD_THRESHOLD preproc_version=$EXPECTED_PREPROC_VERSION label=$POSITIVE_LABEL encoding=$CODE_ENCODING errors=$CODE_ERRORS time_zone=$LOG_TIME_ZONE progress_fragments=$PROGRESS_EVERY_FRAGMENTS progress_pairs=$PROGRESS_EVERY_PAIRS accepted_output_versions=$ACCEPTED_OUTPUT_VERSIONS ast_primary=$AST_PRIMARY_THRESHOLD ast_gram_size=$AST_GRAM_SIZE ast_max_cells=$AST_MAX_COMPARISON_CELLS ast_report=$AST_REPORT_NAME ast_nicad_bands=$AST_NICAD_BAND_EDGES clonetype_min=$CLONETYPE_MIN_SIMILARITY clonetype_max=$CLONETYPE_MAX_SIMILARITY clonetype_report=$CLONETYPE_REPORT_NAME clonetype_progress=$CLONETYPE_PROGRESS_EVERY_PAIRS positive_balance=$POSITIVE_BALANCE_POLICY positive_layout=$POSITIVE_LAYOUT positive_seed=$POSITIVE_SAMPLE_SEED positive_report=$POSITIVE_REPORT_NAME"
+echo "[$(now)] CONFIG input=$INPUT_ROOT input_phase=$EXPECTED_INPUT_PHASE source=$SOURCE_ROOT output=$OUTPUT_ROOT expected_subjects=$EXPECTED_SUBJECTS expected_pairs=$EXPECTED_TOTAL_PAIRS detector=$EXPECTED_DETECTOR config=$EXPECTED_NICAD_CONFIG threshold=$EXPECTED_NICAD_THRESHOLD preproc_version=$EXPECTED_PREPROC_VERSION label=$POSITIVE_LABEL encoding=$CODE_ENCODING errors=$CODE_ERRORS time_zone=$LOG_TIME_ZONE progress_fragments=$PROGRESS_EVERY_FRAGMENTS progress_pairs=$PROGRESS_EVERY_PAIRS accepted_output_versions=$ACCEPTED_OUTPUT_VERSIONS ast_primary=$AST_PRIMARY_THRESHOLD ast_gram_size=$AST_GRAM_SIZE ast_max_cells=$AST_MAX_COMPARISON_CELLS ast_report=$AST_REPORT_NAME ast_nicad_bands=$AST_NICAD_BAND_EDGES clonetype_min=$CLONETYPE_MIN_SIMILARITY clonetype_max=$CLONETYPE_MAX_SIMILARITY clonetype_report=$CLONETYPE_REPORT_NAME clonetype_progress=$CLONETYPE_PROGRESS_EVERY_PAIRS positive_balance=$POSITIVE_BALANCE_POLICY positive_layout=$POSITIVE_LAYOUT positive_seed=$POSITIVE_SAMPLE_SEED positive_record_schema=$POSITIVE_RECORD_SCHEMA function_id_source=$POSITIVE_FUNCTION_ID_SOURCE_FIELD positive_report=$POSITIVE_REPORT_NAME"
 case "$MODE" in
   --inspect)
     CURRENT_SUBJECT="global"

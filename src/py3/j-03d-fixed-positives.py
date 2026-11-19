@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03d v7: deterministic, content-deduplicated positive-only subject balancing.
+"""J-03d v8: deterministic, content-deduplicated positive-only subject balancing.
 
 Runtime configuration comes only from the standalone J-03d Shell wrapper.
 No negative samples, training splits, or changes to original verified CSV/JSONL.
@@ -34,7 +34,7 @@ def stamp(args):
 
 
 def output_line(obj):
-    # Compact one JSON object per line; source code newlines remain escaped.
+    # Compact one JSON object per line; immutable function references only.
     return json.dumps(obj, ensure_ascii=True, sort_keys=True, separators=(',', ':')) + '\n'
 
 
@@ -225,7 +225,9 @@ def render_outputs(args, subject, rows, fragments, stage):
             ids.add(sample_id)
             clone_type='Type 1' if category==T1 else 'Type 3' if category==T3 else 'Type 2'
             public={'sample_id':sample_id,'repository':subject,'clone_type':clone_type,
-                    'label':args.positive_label,'code_a':a['code'],'code_b':b['code']}
+                    'label':args.positive_label,
+                    'left':{'function_id':a['fragment_id']},
+                    'right':{'function_id':b['fragment_id']}}
             detail_item={**public,
                 'clone_subtype':category,
                 'original_pair_id':row['pair_id'],
@@ -312,7 +314,9 @@ def render_all_streaming(args,subject,pool,original,stage):
             sample_id='pos-'+sha256((subject+'\0'+row['pair_id']).encode()).hexdigest()[:24]
             ctype='Type 1' if typ==T1 else 'Type 3' if typ==T3 else 'Type 2'
             common={'sample_id':sample_id,'repository':subject,'clone_type':ctype,
-                    'label':args.positive_label,'code_a':a['code'],'code_b':b['code']}
+                    'label':args.positive_label,
+                    'left':{'function_id':a['fragment_id']},
+                    'right':{'function_id':b['fragment_id']}}
             extra={**common,'clone_subtype':typ,'original_pair_id':row['pair_id'],
                 'nicad_similarity_percent':row['nicad_similarity_raw'],
                 'ast_combined_similarity':round(score,8) if score is not None else None,
@@ -359,6 +363,8 @@ def manifest_effective(args):
         'missing_type_policy':args.positive_missing_type_policy,
         'type2_blind_min':args.positive_type2_blind_min,
         'dedup_strategy':args.positive_dedup_strategy,
+        'record_schema':args.positive_record_schema,
+        'function_id_source_field':args.positive_function_id_source_field,
         'primary_ast_threshold':str(args.ast_primary_threshold),
         'gram_size':args.ast_gram_size,
         'max_ast_comparison_cells':args.ast_max_cells,
@@ -384,6 +390,8 @@ def verify_published(args,subject,census,original):
     require(m['subject']==subject and m['status']=='FIXED_POSITIVE_ONLY',
             'POSITIVE_MANIFEST_STATUS_INVALID '+subject)
     legacy=(m['version']=='v6')
+    legacy_v7_inline=(m['version']=='v7' and args.positive_layout=='sameratio-type'
+                      and args.positive_balance_policy=='equal_available_types')
     if legacy:
         # The v6 manifest is intentionally moved without alteration. Its SHA256
         # keys still reflect the old paths; only its containing directory moved.
@@ -404,6 +412,15 @@ def verify_published(args,subject,census,original):
                 cfg['primary_ast_threshold']==str(args.ast_primary_threshold) and
                 cfg['type2_blind_min']==args.positive_type2_blind_min,
                 'POSITIVE_MIGRATED_V6_CONFIG_INVALID '+subject)
+    elif legacy_v7_inline:
+        cfg=m['effective_configuration']
+        require(cfg['policy']=='equal_available_types' and
+                cfg['output_layout']=='sameratio-type' and
+                cfg['census_sha256']==args.positive_source_census_sha256 and
+                cfg['seed']==args.positive_sample_seed and
+                cfg['dedup_strategy']==args.positive_dedup_strategy and
+                cfg['primary_ast_threshold']==str(args.ast_primary_threshold),
+                'POSITIVE_LEGACY_V7_SAMERATIO_CONFIG_MISMATCH '+subject)
     else:
         require(m['version']==args.version and
                 m['effective_configuration']==manifest_effective(args),
@@ -428,6 +445,8 @@ def verify_published(args,subject,census,original):
             m['files_sha256'][args.positive_details_dir+'/'+args.positive_details_name]==original.sha_file(details),
             'POSITIVE_PUBLISHED_SHA256_MISMATCH '+subject)
     counts=Counter();n=0
+    inline_legacy = legacy or legacy_v7_inline
+    fragments={} if inline_legacy else load_subject_fragments(args,subject,original)
     # SQLite-backed verification to avoid keeping millions of pair hashes/IDs
     # in Python memory for the unbalanced full-coverage mode.
     verify_path=args.run_dir/('positive_verify_'+subject+'.sqlite')
@@ -442,14 +461,37 @@ def verify_published(args,subject,census,original):
                         x['label']==y['label']==args.positive_label and
                         x['clone_type'] in ('Type 1','Type 2','Type 3'),
                         'POSITIVE_OUTPUT_JOIN_INVALID '+subject+':'+str(ln))
-                for key in ('code_a','code_b','clone_type'):
-                    require(x[key]==y[key],
-                            'POSITIVE_PUBLIC_DETAIL_MISMATCH '+subject+':'+str(ln))
-                hashes=tuple(sorted((original.sha_bytes(x['code_a'].encode(args.code_encoding,errors=args.code_errors)),
-                                     original.sha_bytes(x['code_b'].encode(args.code_encoding,errors=args.code_errors)))))
+                require(x['clone_type']==y['clone_type'],
+                        'POSITIVE_PUBLIC_DETAIL_TYPE_MISMATCH '+subject+':'+str(ln))
+                if inline_legacy:
+                    for key in ('code_a','code_b'):
+                        require(x[key]==y[key],
+                                'POSITIVE_LEGACY_PUBLIC_DETAIL_MISMATCH '+subject+':'+str(ln))
+                    hashes=tuple(sorted((original.sha_bytes(x['code_a'].encode(args.code_encoding,errors=args.code_errors)),
+                                         original.sha_bytes(x['code_b'].encode(args.code_encoding,errors=args.code_errors)))))
+                else:
+                    require(set(x)=={'sample_id','repository','clone_type','label','left','right'},
+                            'POSITIVE_PUBLIC_SCHEMA_INVALID '+subject+':'+str(ln))
+                    require('code_a' not in y and 'code_b' not in y and 'clone_label' not in y,
+                            'POSITIVE_DETAIL_EMBEDDED_CODE_FORBIDDEN '+subject+':'+str(ln))
+                    require(x['left']==y['left'] and x['right']==y['right'],
+                            'POSITIVE_PUBLIC_DETAIL_ID_MISMATCH '+subject+':'+str(ln))
+                    ids=[]; sha=[]
+                    for side,src in (('left','source_a'),('right','source_b')):
+                        r=x[side]
+                        require(isinstance(r,dict) and set(r)=={'function_id'},
+                                'POSITIVE_FUNCTION_REFERENCE_INVALID '+subject+':'+str(ln))
+                        fid=r['function_id']
+                        require(isinstance(fid,str) and fid in fragments and
+                                fid==y[src]['fragment_id'] and
+                                fragments[fid]['source_sha256']==y[src]['source_sha256'],
+                                'POSITIVE_FUNCTION_ID_NOT_IN_FRAGMENTS '+subject+':'+str(ln))
+                        ids.append(fid);sha.append(fragments[fid]['source_sha256'])
+                    require(ids[0]!=ids[1], 'POSITIVE_SELF_FUNCTION_PAIR '+subject+':'+str(ln))
+                    hashes=tuple(sorted(sha))
                 require(hashes==tuple(sorted((y['source_a']['source_sha256'],
                                               y['source_b']['source_sha256']))),
-                        'POSITIVE_OUTPUT_CODE_HASH_MISMATCH '+subject+':'+str(ln))
+                        'POSITIVE_OUTPUT_SOURCE_HASH_MISMATCH '+subject+':'+str(ln))
                 code_key=hashes[0]+':'+hashes[1]
                 try:
                     verify_db.execute('INSERT INTO verified VALUES (?,?)',(code_key,x['sample_id']))
@@ -488,7 +530,7 @@ def verify_published(args,subject,census,original):
     print(f'[{stamp(args)}] POSITIVE_VERIFY_PASS subject={subject} '
           f'original={census["pairs"]} fixed={n} T1={m["fixed_type1"]} '
           f'T2={m["fixed_type2_total"]} T3={m["fixed_type3"]} '
-          f'policy={args.positive_balance_policy} legacy_v6={legacy}',flush=True)
+          f'policy={args.positive_balance_policy} legacy_v6={legacy} legacy_v7_inline={legacy_v7_inline}',flush=True)
     return m
 
 
@@ -502,9 +544,9 @@ def classify_and_prepare(args,subject,census,original,ast,parser,h07,h08,runroot
         # An old v6 root file cannot be reinterpreted as the new full-coverage mode.
         if args.positive_layout=='root':
             old=original.read_json(manifest_out)
-            require(old.get('version')!='v6',
-                    'POSITIVE_MIGRATION_REQUIRED: move the v6 public/detail/manifest files '
-                    'to sameratio-type/ before executing new --positiveclone')
+            require(old.get('version')==args.version,
+                    'POSITIVE_MIGRATION_REQUIRED: preserve v7 inline-code public/detail/manifest '
+                    'under legacy-v7/ before running v8 --positiveclone')
         print(f'[{stamp(args)}] POSITIVE_ALREADY_PRESENT_VERIFY subject={subject}',flush=True)
         return verify_published(args,subject,census,original)
     require(not any(existing),
@@ -659,6 +701,9 @@ def report(args, names, manifests, census, original):
 
 
 def run(args, names, original):
+    require(args.positive_record_schema=='function_refs_v8' and
+            args.positive_function_id_source_field=='fragment_id',
+            'POSITIVE_FUNCTION_REFERENCE_CONFIGURATION_INVALID')
     require(len(names)==args.expected_subjects,'POSITIVE_SUBJECT_COUNT_MISMATCH')
     census=load_census(args,names,original)
     runroot=args.run_dir/'fixed_positive'
