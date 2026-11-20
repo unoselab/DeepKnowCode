@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-04c v1: subject-isolated C-01-compatible clone detection of J-04b v8 verified inputs.
+"""J-04c v2: subject-isolated C-01-compatible clone detection of J-04b v8 verified inputs.
 
 Configuration is owned by src/sh3/j-04c-clone-detection.sh and required here via CLI.
 Never re-mask/re-filter source code, and never write inside the J-04b v8 input.
@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -319,7 +320,7 @@ def run_subject(a, manifest, groups, metadata):
     check_tools(a)
     # Always compare every source byte against J-04b audit before a detector starts.
     inventory(a,hash_check=True,subjects_subset=[n])
-    out=a.output_root/n/'runs'/a.run_id
+    out=a.output_root/n
     require(not out.exists() and not out.is_symlink(), 'Run output exists; refusing overwrite: '+str(out))
     require(not out.parent.is_symlink(),'Unsafe run root symlink')
     out.parent.mkdir(parents=True,exist_ok=True)
@@ -406,7 +407,7 @@ def run_subject(a, manifest, groups, metadata):
               'hybrid/hybrid_function_clone_pairs.csv','jscpd/jscpd-report.json',
               'nicad_xml/'+xml_dest.name]
         for name in keep: require((out/name).is_file(),'Expected detector artifact missing: '+name)
-        done={'schema':'deepknowcode-j04c-v1','experiment':a.experiment,'version':a.version,
+        done={'schema':f'deepknowcode-j04c-{a.version}','experiment':a.experiment,'version':a.version,
               'status':'COMPLETED','timestamp_chicago':chicago(),
               'subject':n,'run_id':a.run_id,'input_data_version':a.source_data_version,
               'input_policy':a.input_policy,'input_root':str(a.input_root),
@@ -437,7 +438,7 @@ def run_subject(a, manifest, groups, metadata):
               f'clone_pairs={len(pairs)} run={out}',flush=True)
     except BaseException as error:
         # Preserve all partial run data, including failures. Never touch input or existing results.
-        fail={'schema':'deepknowcode-j04c-v1','experiment':a.experiment,'version':a.version,
+        fail={'schema':f'deepknowcode-j04c-{a.version}','experiment':a.experiment,'version':a.version,
               'status':'FAILED','subject':n,'run_id':a.run_id,'timestamp_chicago':chicago(),
               'error':str(error),'run':str(out)}
         write_json_new(out/'j04c-failed.json',fail)
@@ -446,13 +447,10 @@ def run_subject(a, manifest, groups, metadata):
 
 
 def verify_subject(a, n, group):
-    root = a.output_root/n/'runs'
-    require(root.is_dir() and not root.is_symlink(), 'No J-04c run directory for '+n)
-    completed = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink())
-    require(bool(completed), 'No J-04c runs for '+n)
-    run=completed[-1]  # Latest, including failed; never silently choose an older success.
+    run = a.output_root/n
+    require(run.is_dir() and not run.is_symlink(), 'No J-04c subject result directory: '+str(run))
     m=read_json(run/'j04c-run.json')
-    require(m.get('schema')=='deepknowcode-j04c-v1' and m.get('status')=='COMPLETED' and
+    require(m.get('schema')==f'deepknowcode-j04c-{a.version}' and m.get('status')=='COMPLETED' and
             m.get('version')==a.version and m.get('subject')==n and
             m.get('input_data_version')==a.source_data_version and
             m.get('source_files')==len(group),'J04c run manifest mismatch: '+str(run))
@@ -494,9 +492,9 @@ def arguments(argv=None):
     for name in ('experiment','version','source-data-version','input-policy','expected-python-version',
                  'nicad-granularity','nicad-language','nicad-config','nicad-xml-pattern',
                  'jscpd-launcher','jscpd-package','jscpd-format','jscpd-reporter','probe-mode',
-                 'merge-git-blob-sha','run-id','log-timezone'):
+                 'merge-git-blob-sha','run-id','log-timezone','batch-mode'):
         p.add_argument('--'+name,required=True)
-    for name in ('root','dataset-root','input-root','output-root','nicad-home','nicad-bin','txl-bin',
+    for name in ('root','dataset-root','input-root','output-root','result-root','publish-root','nicad-home','nicad-bin','txl-bin',
                  'merge-script','report-dir'):
         p.add_argument('--'+name,type=Path,required=True)
     for name in ('expected-subjects','expected-files','expected-upstream-included',
@@ -508,17 +506,19 @@ def arguments(argv=None):
         p.add_argument('--'+name,type=float,required=True)
     p.add_argument('--hash-check',required=True,choices=['true','false'])
     p.add_argument('--mode',choices=['inspect','dry-run','list-subjects','run-subject',
-                                     'verify','summary'],required=True)
+                                     'verify','summary','copy-result'],required=True)
     p.add_argument('--subject',required=True)
     a=p.parse_args(argv)
     require(a.log_timezone == 'America/Chicago', 'This experiment requires Chicago timestamps')
     os.environ['J04C_LOG_TIMEZONE'] = a.log_timezone
-    for name in ('root','dataset_root','input_root','output_root','nicad_home','nicad_bin','txl_bin',
+    for name in ('root','dataset_root','input_root','output_root','result_root','publish_root','nicad_home','nicad_bin','txl_bin',
                  'merge_script','report_dir'):
         setattr(a,name,getattr(a,name).absolute())
     require(a.experiment=='j-04c' and a.version.startswith('v') and a.version[1:].isdigit(),
             'Unexpected experiment/version')
     require(a.probe_mode in ('all','on_bulk_failures'),'Invalid --probe-mode')
+    require(a.batch_mode in ('inspect','dry-run','smoke','subject','all','verify','copy-result'),
+            'Invalid --batch-mode')
     require(a.expected_subjects>0 and a.expected_files>0 and
             a.expected_upstream_included>=a.expected_files and a.expected_unparsed>=0,
             'Invalid dataset expectations')
@@ -531,19 +531,168 @@ def arguments(argv=None):
     require(all(getattr(a,n)>0 for n in ('probe_timeout_sec','probe_progress_every','copy_progress_every',
                 'nicad_timeout_sec','jscpd_timeout_sec','merge_timeout_sec')),
             'Non-positive logging/probe/timeouts')
-    require(a.dataset_root != a.output_root and a.dataset_root not in a.output_root.parents and
-            a.output_root not in a.dataset_root.parents,
-            'Input/output roots overlap')
+    require(a.output_root == a.report_dir/'subjects' and a.report_dir.parent == a.result_root,
+            'Result/output hierarchy mismatch')
+    require(a.dataset_root not in (a.result_root,a.publish_root) and
+            a.dataset_root not in a.result_root.parents and
+            a.result_root not in a.dataset_root.parents and
+            a.dataset_root not in a.publish_root.parents and
+            a.publish_root not in a.dataset_root.parents and
+            a.result_root not in a.publish_root.parents and
+            a.publish_root not in a.result_root.parents,
+            'Input/result/publish roots overlap')
     require(bool(re.fullmatch(r'[A-Za-z0-9_.-]{1,100}',a.run_id)), 'Invalid run ID')
     if a.mode in ('run-subject',):
         require(SUBJECT.fullmatch(a.subject) is not None, 'Invalid selected subject')
     return a
 
 
+
+def report_candidates(result_root, mode):
+    require(result_root.is_dir() and not result_root.is_symlink(),
+            'Result root missing/unsafe: '+str(result_root))
+    return sorted((d for d in result_root.iterdir()
+                   if d.is_dir() and not d.is_symlink() and f'-{mode}-' in d.name),
+                  key=lambda d:d.name, reverse=True)
+
+
+def latest_all_result(a):
+    candidates = report_candidates(a.result_root, 'all')
+    require(bool(candidates), 'No J-04c --all result found; --copy-result requires completed --all')
+    # Never fall back to an older completed run if the newest --all attempt failed.
+    chosen = candidates[0]
+    summary = read_json(chosen/'batch-summary.json')
+    require(summary.get('experiment')==a.experiment and summary.get('version')==a.version and
+            summary.get('batch_mode')=='all' and summary.get('status')=='COMPLETED' and
+            summary.get('completed_subjects')==a.expected_subjects and
+            summary.get('expected_subjects')==a.expected_subjects and
+            summary.get('source_data_version')==a.source_data_version and
+            summary.get('source_input')==str(a.input_root),
+            'Latest --all result is not a complete matching J-04c batch: '+str(chosen))
+    return chosen,summary
+
+
+def verify_batch(a, root, groups, selected):
+    require(root.is_dir() and not root.is_symlink(), 'Missing/unsafe result directory: '+str(root))
+    a.output_root=root/'subjects'
+    results=[]
+    for n in selected:
+        require(n in groups, 'Unknown subject: '+n)
+        results.append(verify_subject(a,n,groups[n]))
+    return results
+
+
+def collect_source_files(source_root):
+    """Walk a completed subject result without following symlinks or special files."""
+    require(source_root.is_dir() and not source_root.is_symlink(),
+            'Missing/unsafe result source: '+str(source_root))
+    paths={}
+    for base,dirs,files in os.walk(source_root,followlinks=False):
+        here=Path(base)
+        for name in dirs:
+            require(not (here/name).is_symlink(), 'Symlinked source directory: '+str(here/name))
+        for name in files:
+            src=here/name
+            require(src.is_file() and not src.is_symlink(), 'Unsafe source file: '+str(src))
+            rel=src.relative_to(source_root).as_posix()
+            require(rel not in paths, 'Duplicate file in result tree: '+rel)
+            paths[rel]=src
+    require(bool(paths), 'Empty subject result: '+str(source_root))
+    return paths
+
+
+def copy_result(a, groups):
+    latest, summary=latest_all_result(a)
+    names=sorted(groups)
+    recorded=summary.get('subjects',[])
+    require(len(recorded)==len(names) and
+            {r['subject'] for r in recorded}==set(names) and
+            all(r.get('status')=='COMPLETED' for r in recorded),
+            'Incomplete or inconsistent subjects in --all summary')
+    print(f'[{chicago()}] COPY_SOURCE full_all={latest} subjects={len(names)}',flush=True)
+    verified=verify_batch(a,latest,groups,names)
+    require(len(verified)==a.expected_subjects and
+            sum(v['source_files'] for v in verified)==a.expected_files and
+            sum(v['clone_pairs'] for v in verified)==summary.get('clone_pairs_total'),
+            'Source result aggregate mismatch')
+    for r in recorded:
+        v=next(x for x in verified if x['subject']==r['subject'])
+        require(r['source_files']==v['source_files'] and r['clone_pairs']==v['clone_pairs'] and
+                r['run']==v['run'], 'Subject summary/source identity mismatch: '+r['subject'])
+    dest=a.publish_root
+    require(not dest.is_symlink(), 'Publish root is a symlink: '+str(dest))
+    exists=dest.exists()
+    if exists:
+        require(dest.is_dir() and not dest.is_symlink() and not any(dest.iterdir()),
+                'Publish destination already exists and is not empty; refusing overwrite: '+str(dest))
+    require(not dest.parent.is_symlink(), 'Publish parent is a symlink')
+    # Stage alongside destination. Destination itself appears only after all copies verify.
+    dest.parent.mkdir(parents=True,exist_ok=True)
+    temporary=Path(tempfile.mkdtemp(prefix='.'+dest.name+'.j04c-pending-',dir=dest.parent))
+    entries=[]
+    try:
+        for n in names:
+            source=latest/'subjects'/n
+            files=collect_source_files(source)
+            target=temporary/n
+            target.mkdir(parents=True,exist_ok=False)
+            hashes={}
+            for index,(rel,src) in enumerate(sorted(files.items()),1):
+                dst=target/Path(rel)
+                dst.parent.mkdir(parents=True,exist_ok=True)
+                shutil.copy2(src,dst,follow_symlinks=False)
+                sha=digest(src)
+                require(digest(dst)==sha and dst.stat().st_size==src.stat().st_size,
+                        'Result copy SHA256 mismatch: '+str(dst))
+                hashes[rel]=sha
+                if index % a.copy_progress_every==0:
+                    print(f'[{chicago()}] COPY_PROGRESS subject={n} copied={index}/{len(files)}',flush=True)
+            src_run=read_json(source/'j04c-run.json')
+            entries.append({'subject':n,'source_result':str(source),
+                            'files_copied':len(files),
+                            'source_files':src_run['source_files'],
+                            'clone_pairs':src_run['metrics']['hybrid_unique_pairs'],
+                            'j04c_run_sha256':hashes['j04c-run.json'],
+                            'copy_file_sha256':hashes})
+            print(f'[{chicago()}] PASS COPY_SUBJECT subject={n} files={len(files)} pairs={entries[-1]["clone_pairs"]}',flush=True)
+        shutil.copy2(latest/'batch-summary.json',temporary/'batch-summary.json')
+        require(digest(temporary/'batch-summary.json') == digest(latest/'batch-summary.json'),
+                'Copied batch-summary.json hash differs from full run')
+        receipt={'schema':f'deepknowcode-j04c-copy-{a.version}',
+                 'experiment':a.experiment,'version':a.version,
+                 'status':'COMPLETED','timestamp_chicago':chicago(),
+                 'source_data_version':a.source_data_version,
+                 'source_dataset_root':str(a.input_root),
+                 'source_all_result':str(latest),
+                 'source_batch_summary_sha256':digest(latest/'batch-summary.json'),
+                 'published_root':str(dest),'published_subjects':len(entries),
+                 'source_files':sum(r['source_files'] for r in entries),
+                 'clone_pairs_total':sum(r['clone_pairs'] for r in entries),
+                 'subjects':entries}
+        write_json_new(temporary/'j04c-copy-manifest.json',receipt)
+        require(not dest.is_symlink(), 'Publish destination symlink appeared during copy')
+        if exists:
+            require(dest.is_dir() and not any(dest.iterdir()),
+                    'Publish destination became nonempty during copy: '+str(dest))
+        else:
+            require(not dest.exists(), 'Publish destination appeared during copy: '+str(dest))
+        # POSIX rename atomically publishes a complete tree; an existing empty
+        # destination directory may be replaced, never a nonempty one.
+        temporary.rename(dest)
+        print(f'PASS J04C_COPY_RESULT subjects={len(entries)} input_files={a.expected_files} '
+              f'clone_pairs={receipt["clone_pairs_total"]} destination={dest}',flush=True)
+        return receipt
+    except BaseException:
+        # Only pending output created by this invocation may be removed; never source/older results.
+        if temporary.is_dir() and not temporary.is_symlink():
+            shutil.rmtree(temporary)
+        raise
+
+
 def main(argv=None):
     a=arguments(argv)
     if a.mode=='list-subjects':
-        m,groups,_=inventory(a,hash_check=False,subjects_subset=[])
+        _,groups,_=inventory(a,hash_check=False,subjects_subset=[])
         for n in sorted(groups): print(n)
         return 0
     if a.mode in ('inspect','dry-run'):
@@ -551,64 +700,74 @@ def main(argv=None):
         if a.mode=='dry-run': check_tools(a)
         print(f'PASS {a.mode.upper()} subjects={len(groups)} files={sum(len(v) for v in groups.values())} '
               f'unparsed_excluded={m["counts"]["unparsed_excluded"]} '
-              f'output={a.output_root}',flush=True)
+              f'result_root={a.result_root} publish_root={a.publish_root}',flush=True)
         return 0
     if a.mode=='run-subject':
         m,groups,metadata=inventory(a,hash_check=False,subjects_subset=[])
         run_subject(a,m,groups,metadata)
         return 0
     if a.mode=='verify':
-        m,groups,_=inventory(a,hash_check=a.hash_check=='true',subjects_subset=[])
-        selected=[a.subject] if a.subject!='ALL' else sorted(groups)
-        verified=[]
-        for n in selected:
-            require(n in groups,'Unknown verification subject')
-            if a.subject=='ALL' and not (a.output_root/n/'runs').exists():
-                continue
-            verified.append(verify_subject(a,n,groups[n]))
-        require(bool(verified),'No completed J-04c run found')
-        if a.subject == 'ALL':
-            require(len(verified)==a.expected_subjects,
-                    f'Full verification requires {a.expected_subjects} completed subject runs; found {len(verified)}')
+        _,groups,_=inventory(a,hash_check=a.hash_check=='true',subjects_subset=[])
+        if a.subject=='ALL':
+            latest,_=latest_all_result(a)
+            selected=sorted(groups)
+        else:
+            # For subject checks use the newest output containing this subject, including failed.
+            candidates=[d for d in a.result_root.iterdir()
+                        if d.is_dir() and not d.is_symlink() and
+                        any(f'-{mode}-' in d.name for mode in ('all','smoke','subject')) and
+                        (d/'subjects'/a.subject).exists()]
+            require(bool(candidates),'No subject result found for '+a.subject)
+            latest=sorted(candidates,key=lambda d:d.name)[-1]
+            selected=[a.subject]
+        results=verify_batch(a,latest,groups,selected)
         a.report_dir.mkdir(parents=True,exist_ok=True)
-        report_name=('verification-all.json' if a.subject=='ALL' else f'verification-{a.subject}.json')
-        write_json_new(a.report_dir/report_name,{'status':'PASS','timestamp_chicago':chicago(),
-                      'verified_subjects':len(verified),'results':verified})
-        print(f'PASS J04C_VERIFY_ALL verified_subjects={len(verified)} '
-              f'expected_subjects={a.expected_subjects}',flush=True)
+        filename='verification-all.json' if a.subject=='ALL' else f'verification-{a.subject}.json'
+        write_json_new(a.report_dir/filename,{'status':'PASS','timestamp_chicago':chicago(),
+                       'source_result_root':str(latest),'verified_subjects':len(results),
+                       'results':results})
+        print(f'PASS J04C_VERIFY_ALL verified_subjects={len(results)} '
+              f'expected_subjects={a.expected_subjects} source={latest}',flush=True)
         return 0
     if a.mode=='summary':
-        m,groups,_=inventory(a,hash_check=False,subjects_subset=[])
+        _,groups,_=inventory(a,hash_check=False,subjects_subset=[])
+        require(a.batch_mode in ('all','smoke','subject'), 'Unexpected summary batch mode')
+        names=sorted(groups) if a.batch_mode=='all' else [a.subject]
+        require(all(n in groups for n in names), 'Invalid summary subject')
         summary=[]
-        for n in sorted(groups):
-            path=a.output_root/n/'runs'
-            if not path.is_dir():
-                summary.append({'subject':n,'status':'NOT_RUN'})
-                continue
-            runs=sorted(p for p in path.iterdir() if p.is_dir() and not p.is_symlink())
-            if not runs:
-                summary.append({'subject':n,'status':'NOT_RUN'})
-                continue
-            latest=runs[-1]
-            file=latest/'j04c-run.json'
-            if file.is_file():
-                d=read_json(file)
-                summary.append({'subject':n,'status':d.get('status'),
-                                'source_files':d.get('source_files'),
-                                'clone_pairs':d.get('metrics',{}).get('hybrid_unique_pairs'),
-                                'run':str(latest)})
-            else:
-                summary.append({'subject':n,'status':'INCOMPLETE_OR_FAILED','run':str(latest)})
-        complete=[x for x in summary if x['status']=='COMPLETED']
-        obj={'experiment':a.experiment,'version':a.version,'timestamp_chicago':chicago(),
+        for n in names:
+            path=a.output_root/n
+            require(path.is_dir() and not path.is_symlink(), 'Missing batch subject result: '+n)
+            d=read_json(path/'j04c-run.json')
+            require(d.get('status')=='COMPLETED' and d.get('version')==a.version and
+                    d.get('subject')==n and d.get('run_id')==a.run_id,
+                    'Batch subject is not completed by this invocation: '+n)
+            summary.append({'subject':n,'status':'COMPLETED',
+                            'source_files':d['source_files'],
+                            'clone_pairs':d['metrics']['hybrid_unique_pairs'],
+                            'run':str(path)})
+        total=sum(x['source_files'] for x in summary)
+        if a.batch_mode=='all':
+            require(len(summary)==a.expected_subjects and total==a.expected_files,
+                    'Full --all batch has incorrect subject/file counts')
+        obj={'schema':f'deepknowcode-j04c-batch-{a.version}',
+             'experiment':a.experiment,'version':a.version,'status':'COMPLETED',
+             'batch_mode':a.batch_mode,'run_id':a.run_id,
+             'timestamp_chicago':chicago(),
              'source_data_version':a.source_data_version,'source_input':str(a.input_root),
-             'output_root':str(a.output_root),'expected_subjects':a.expected_subjects,
-             'completed_subjects':len(complete),'clone_pairs_total':sum(x['clone_pairs'] for x in complete),
+             'result_root':str(a.report_dir),'publish_root':str(a.publish_root),
+             'expected_subjects':a.expected_subjects,
+             'completed_subjects':len(summary),'input_files_total':total,
+             'clone_pairs_total':sum(x['clone_pairs'] for x in summary),
              'subjects':summary}
-        a.report_dir.mkdir(parents=True,exist_ok=True)
         write_json_new(a.report_dir/'batch-summary.json',obj)
-        print(f'PASS J04C_SUMMARY subjects_completed={len(complete)}/{a.expected_subjects} '
+        print(f'PASS J04C_SUMMARY batch_mode={a.batch_mode} '
+              f'subjects_completed={len(summary)}/{a.expected_subjects} '
               f'pairs={obj["clone_pairs_total"]} report={a.report_dir / "batch-summary.json"}',flush=True)
+        return 0
+    if a.mode=='copy-result':
+        _,groups,_=inventory(a,hash_check=a.hash_check=='true')
+        copy_result(a,groups)
         return 0
     raise AssertionError('Unreachable mode')
 
