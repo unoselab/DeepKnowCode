@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
-# DeepKnowCode J-04a v1 - Python C-01 batch copy-only organization.
+# DeepKnowCode J-04a v3 - Python C-01 batch copy-only organization.
+#
+# Standard execution sequence (run from the DeepKnowCode repository root):
+#
+# Step 1: Original Snapshot Inspection
+# bash src/sh3/j-04a-organize-python-clones.sh --inspect
+#
+# Step 2: Copy Plan Validation
+# bash src/sh3/j-04a-organize-python-clones.sh --dry-run
+#
+# Step 3: Copy 24 Subjects and Original Archive
+# bash src/sh3/j-04a-organize-python-clones.sh --copy
+#
+# Step 4: Independent SHA256 Verification
+# bash src/sh3/j-04a-organize-python-clones.sh --verify
+#
 set -Eeuo pipefail
 
 # All runtime parameters are defined here; the Python implementation has no
 # experiment-specific defaults. Server script filenames intentionally have no version suffix.
 EXPERIMENT='j-04a'
-SCRIPT_VERSION='v1'
+SCRIPT_VERSION='v3'
 MODE=''  # Required CLI choice: --inspect | --dry-run | --copy | --verify
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN='python3'
@@ -16,7 +31,7 @@ EXPECTED_SUBJECTS='24'
 ORGANIZER_NAME='organizer-20261103-013600-284803.json'
 BATCH_NAME='20261102-150146-232146'
 LOG_DIR="$ROOT/logs/j-04a"
-LOG_PREFIX='j-04a-v1-python-clone-organization'
+LOG_PREFIX='j-04a-v3-python-clone-organization'
 LOG_TIMESTAMP_FORMAT='+%Y%m%d-%H%M%S-%N'
 LOG_TZ='America/Chicago'
 LOG_CAPTURE_STDOUT='true'
@@ -83,5 +98,6 @@ step_start "$MODE"
   --expected-subjects "$EXPECTED_SUBJECTS" \
   --organizer-name "$ORGANIZER_NAME" \
   --batch-name "$BATCH_NAME" \
-  --mode "$MODE"
+  --mode "$MODE" \
+  --publication-version "$SCRIPT_VERSION"
 step_pass

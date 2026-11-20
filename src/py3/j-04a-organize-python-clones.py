@@ -105,7 +105,11 @@ def verify_snapshot(snapshot, entry, source_root):
     require(manifest.get("project") == entry.get("project"), "Manifest project mismatch")
     for k in ("github_slug", "commit", "remote", "c01_run_id", "files"):
         require(manifest.get(k) == entry.get(k), f"Manifest/organizer conflict: {k} at {snapshot}")
-    require(manifest.get("action") == "COPIED", "Snapshot manifest not COPIED")
+    # C-01 v9 writes artifact_manifest.json BEFORE setting entry["action"] = "COPIED".
+    # The organizer summary records COPIED, while source snapshot manifests normally
+    # omit this field.  Preserve exact original bytes; never backfill action.
+    require(manifest.get("action") in (None, "COPIED"),
+            f"Invalid snapshot manifest action: {manifest.get('action')!r}")
     require(manifest.get("snapshot") == str(source_root / snapshot.relative_to(source_root)), "Original snapshot identity mismatch")
     files = manifest["files"]
     require(isinstance(files, dict) and len(files) == entry.get("file_count", -1), "Manifest file count mismatch")
@@ -168,11 +172,11 @@ def inspect_source(src, expected_subjects, organizer_name, batch_name):
     return sorted(index)
 
 
-def publication_record(canonical, name, runid, entry, source_root):
+def publication_record(canonical, name, runid, entry, source_root, publication_version):
     snapshot = source_root / name / "runs" / runid
     orig_manifest = snapshot / "artifact_manifest.json"
     return {
-        "experiment": "J-04a", "version": "v1", "status": "DETECTOR_SNAPSHOT_COPY_UNMODIFIED",
+        "experiment": "J-04a", "version": publication_version, "status": "DETECTOR_SNAPSHOT_COPY_UNMODIFIED",
         "dataset_role": "BEFORE_PREPROC_C01_DETECTOR_ARTIFACTS_NOT_SOURCE_CODE",
         "positive_labels_verified": False, "negative_pairs_present": False,
         "subject": canonical, "source_subject": name, "c01_run_id": runid,
@@ -183,7 +187,7 @@ def publication_record(canonical, name, runid, entry, source_root):
     }
 
 
-def verify_target(src, dst, index, batch_name, require_complete=True):
+def verify_target(src, dst, index, batch_name, publication_version):
     before = dst / "1before-preproc"
     archive = dst / "archive" / "c-01-batch"
     require(before.is_dir() and not before.is_symlink(), "Missing before-preproc")
@@ -204,12 +208,12 @@ def verify_target(src, dst, index, batch_name, require_complete=True):
         require(set(published_files) == set(original_files) | {"j-04a-publication.json"}, "Published files differ")
         for rel, orig in original_files.items():
             require(sha256(orig) == sha256(published / rel), f"Published file changed: {canonical}/{rel}")
-        require(read_json(published / "j-04a-publication.json") == publication_record(canonical, name, runid, entry, src), f"Publication manifest mismatch: {canonical}")
+        require(read_json(published / "j-04a-publication.json") == publication_record(canonical, name, runid, entry, src, publication_version), f"Publication manifest mismatch: {canonical}")
         print(f"PASS VERIFY subject={canonical}", flush=True)
     print(f"PASS VERIFY_ALL subjects={len(index)} archive_files={nfiles} output={dst}", flush=True)
 
 
-def do_copy(src, dst, index, batch_name):
+def do_copy(src, dst, index, batch_name, publication_version):
     require(dst.is_dir() and not dst.is_symlink(), f"Target Python root must already exist: {dst}")
     for dirname in ROOT_SUBDIRS:
         p = dst / dirname
@@ -227,10 +231,10 @@ def do_copy(src, dst, index, batch_name):
             source_snapshot = stage / "archive" / "c-01-batch" / name / "runs" / runid
             target = stage / "1before-preproc" / canonical
             shutil.copytree(source_snapshot, target, symlinks=False)
-            record = publication_record(canonical, name, runid, entry, src)
+            record = publication_record(canonical, name, runid, entry, src, publication_version)
             (target / "j-04a-publication.json").write_text(json.dumps(record, indent=2, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
             print(f"PASS PREPARED subject={canonical}", flush=True)
-        verify_target(src, stage, index, batch_name)
+        verify_target(src, stage, index, batch_name, publication_version)
         # Install only after complete staging verification. Empty user-created directories remain untouched.
         for dirname in ROOT_SUBDIRS:
             dest = dst / dirname
@@ -245,7 +249,7 @@ def do_copy(src, dst, index, batch_name):
             else:
                 work.rename(dest)
                 installed.append(dest)
-        verify_target(src, dst, index, batch_name)
+        verify_target(src, dst, index, batch_name, publication_version)
         print(f"PASS COPY subjects={len(index)} destination={dst}", flush=True)
     except BaseException:
         # Remove only artifacts installed in this invocation, not any original/user data.
@@ -267,12 +271,14 @@ def main():
     parser.add_argument("--expected-subjects", type=int, required=True)
     parser.add_argument("--organizer-name", required=True)
     parser.add_argument("--batch-name", required=True)
+    parser.add_argument("--publication-version", required=True)
     parser.add_argument("--mode", choices=("inspect", "dry-run", "copy", "verify"), required=True)
     args = parser.parse_args()
     try:
         src = args.source_root.absolute()
         dst = args.python_root.absolute()
         require(args.expected_subjects > 0, "Invalid expected subjects")
+        require(re.fullmatch(r"v[1-9][0-9]*", args.publication_version), "Invalid publication version")
         require(src != dst and src not in dst.parents and dst not in src.parents, "Source and destination must not overlap")
         require(not src.is_symlink() and not dst.is_symlink(), "Top-level symlinks disallowed")
         index = inspect_source(src, args.expected_subjects, args.organizer_name, args.batch_name)
@@ -285,9 +291,9 @@ def main():
                 require(not p.exists() or (p.is_dir() and not any(p.iterdir()) and not p.is_symlink()), f"Nonempty/unsafe target: {p}")
             print(f"PASS DRY_RUN subjects={len(index)} destination={dst}")
         elif args.mode == "copy":
-            do_copy(src, dst, index, args.batch_name)
+            do_copy(src, dst, index, args.batch_name, args.publication_version)
         else:
-            verify_target(src, dst, index, args.batch_name)
+            verify_target(src, dst, index, args.batch_name, args.publication_version)
         return 0
     except (MigrationError, OSError, KeyError, TypeError, ValueError) as exc:
         print(f"FAIL J-04a: {exc}", file=sys.stderr)
