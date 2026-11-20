@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Standalone J-03d v8 archival of v7 root inline-code positives; no overwrite.
+# Standalone J-03d v9 archival of v7 root inline-code positives; no overwrite.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 EXPERIMENT="j-03d"
-VERSION="v8"
+VERSION="v9"
 MODE="archive-inline-v7"
-BASE="$ROOT/data/clone-detection/3pos-clones"
+BASE="$ROOT/data/clone-detection/java/3pos-clones"
 EXPECTED_SUBJECTS=47
 LOG_DIR="$ROOT/logs/j-03d"
-LOG_PREFIX="j-03d-v8-archive-inline-v7"
+LOG_PREFIX="j-03d-v9-archive-inline-v7"
 LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S-%6N"
 LOG_TIME_ZONE="America/Chicago"
 LOG_TEE_APPEND="true"

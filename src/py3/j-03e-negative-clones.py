@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03e v2: per-subject AST-low-similarity negative *candidates*, never semantic gold.
+"""J-03e v3 script (v2 dataset schema): per-subject AST-low-similarity negative *candidates*, never semantic gold.
 
 All experiment configuration must be passed by the shell. No data is changed in 3pos-clones.
 """
@@ -66,6 +66,7 @@ def parser_args():
               'code-encoding','code-errors','positive-policy','positive-schema',
               'h07-expected-sha256','h08-expected-sha256',
               'source-manifest-name','fragment-name','original-positive-csv-name',
+              'script-version','legacy-positive-root','legacy-negative-root',
               'fixed-positive-public-name','fixed-positive-details-name',
               'fixed-positive-manifest-name','positive-details-dir'):
         p.add_argument('--'+n,required=True)
@@ -77,11 +78,15 @@ def parser_args():
     p.add_argument('--negative-similarity-max',required=True,type=float)
     p.add_argument('--positive-ast-threshold',required=True,type=float)
     a=p.parse_args()
-    for n in ('positive_root','negative_root','run_dir','h07_python','h08_python'):
+    for n in ('positive_root','negative_root','legacy_positive_root','legacy_negative_root','run_dir','h07_python','h08_python'):
         setattr(a,n,Path(getattr(a,n)).expanduser().resolve())
     need(a.mode in ('negativeclone-feasibility','negativeclone','negativeclone-verify'),'INVALID_MODE')
     need(a.time_zone=='America/Chicago','TIMEZONE_MISMATCH')
-    need(a.experiment=='j-03e' and a.version=='v2','EXPERIMENT_VERSION_MISMATCH')
+    need(a.experiment=='j-03e' and a.version=='v2' and a.script_version=='v3',
+         'EXPERIMENT_SCRIPT_OR_DATASET_VERSION_MISMATCH')
+    need(a.positive_root==a.legacy_positive_root.parent/'java'/a.legacy_positive_root.name and
+         a.negative_root==a.legacy_negative_root.parent/'java'/a.legacy_negative_root.name,
+         'INVALID_JAVA_LAYOUT_RELOCATION')
     need(a.positive_label==1 and a.negative_label==0,'LABEL_CONFIGURATION_INVALID')
     need(a.positive_policy=='all_available_types' and a.positive_schema=='function_refs_v8',
          'POSITIVE_INPUT_POLICY_OR_SCHEMA_UNEXPECTED')
@@ -446,6 +451,18 @@ def effective_config(a):
             'expected_subjects':a.expected_subjects,'expected_total_positives':a.expected_total_positives}
 
 
+def recorded_configuration_identity(a, recorded, current):
+    """Permit only the two-root relocation; reject any other config drift."""
+    if recorded == current:
+        return 'CURRENT'
+    legacy = dict(current)
+    legacy['positive_root'] = str(a.legacy_positive_root)
+    legacy['negative_root'] = str(a.legacy_negative_root)
+    if recorded == legacy:
+        return 'LEGACY_RELOCATED'
+    need(False, 'NEGATIVE_EFFECTIVE_CONFIGURATION_DRIFT')
+
+
 def expected_paths(a,subject):
     root=a.negative_root/subject
     return root,root/a.public_name,root/a.detail_dir/a.detail_name,root/a.detail_dir/a.manifest_name
@@ -461,8 +478,11 @@ def verify_output(a,subject,target,records,db,scorer,pm,config,root_override=Non
     m=read_json(mp)
     need(m.get('status')=='FIXED_NEGATIVE_CANDIDATES' and m.get('subject')==subject,
          'NEGATIVE_MANIFEST_INVALID '+subject)
-    need(m.get('effective_configuration')=={**config,'mode':'negativeclone'},
-         'NEGATIVE_EFFECTIVE_CONFIGURATION_DRIFT '+subject)
+    layout_identity = recorded_configuration_identity(
+        a, m.get('effective_configuration'), {**config, 'mode':'negativeclone'})
+    if layout_identity == 'LEGACY_RELOCATED':
+        emit(a, 'NEGATIVE_RELOCATED_MANIFEST_PASS', subject=subject,
+             old_root=a.legacy_negative_root, current_root=a.negative_root)
     need(m.get('positive_manifest_sha256')==sha_file(a.positive_root/subject/a.positive_details_dir/a.fixed_positive_manifest_name),
          'NEGATIVE_INPUT_POSITIVE_MANIFEST_DRIFT '+subject)
     need(m.get('positive_fixed_pairs')==target and m.get('fixed_negative_pairs')==target,
@@ -562,7 +582,8 @@ def subject_task(a,subject,target,parser,h07,h08,config):
                                f'accepted={result["accepted"]} target={target} '
                                f'attempts={result["attempts"]} max_attempts={result["max_attempts"]}; '
                                f'diagnostics={runsubject / "failure_diagnostics.json"}')
-        manifest={'experiment':a.experiment,'version':a.version,'subject':subject,
+        manifest={'experiment':a.experiment,'version':a.version,
+                  'script_version':a.script_version,'subject':subject,
                   'status':'FIXED_NEGATIVE_CANDIDATES','generated_at_chicago':clock(a),
                   'effective_configuration':{**config,'mode':'negativeclone'},
                   'positive_fixed_pairs':target,'fixed_negative_pairs':result['accepted'],
@@ -590,7 +611,8 @@ def subject_task(a,subject,target,parser,h07,h08,config):
 
 
 def write_summary(a,results,subject_targets):
-    summary={'experiment':a.experiment,'version':a.version,'mode':a.mode,
+    summary={'experiment':a.experiment,'version':a.version,
+             'script_version':a.script_version,'mode':a.mode,
              'generated_at_chicago':clock(a),
              'status':('FEASIBILITY_HARD_BLOCKER' if any(r.get('status')=='UPPER_BOUND_IMPOSSIBLE' for r in results)
                        else 'FEASIBILITY_PROBE_ONLY') if a.mode=='negativeclone-feasibility' else 'PASS',

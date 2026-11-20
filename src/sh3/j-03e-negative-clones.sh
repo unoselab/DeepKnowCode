@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DeepKnowCode J-03e v2 - Negative Clone Candidate Pair Preparation
+# DeepKnowCode J-03e v3 (v2 dataset compatible) - Negative Clone Candidate Pair Preparation
 # =============================================================================
-# Run from the DeepKnowCode repository root. Install the matching J-03e v2
+# Run from the DeepKnowCode repository root. Install the matching J-03e v3
 # Python implementation first. Source J-03d v8 positives remain READ-ONLY.
 #
 # 0. Prerequisite: 47 J-03d v8 subjects and summary are present under
-#    data/clone-detection/3pos-clones/; tree-sitter and tree-sitter-java
+#    data/clone-detection/java/3pos-clones/; tree-sitter and tree-sitter-java
 #    versions match the configuration below.
 #
 # 1. Check available modes and usage (no dataset changes):
@@ -29,8 +29,8 @@
 #    bash src/sh3/j-03e-negative-clones.sh --negativeclone --subject apache__ant
 #    bash src/sh3/j-03e-negative-clones.sh --negativeclone-verify --subject apache__ant
 #
-# Input : data/clone-detection/3pos-clones/{subject}/
-# Output: data/clone-detection/4neg-clones/{subject}/
+# Input : data/clone-detection/java/3pos-clones/{subject}/
+# Output: data/clone-detection/java/4neg-clones/{subject}/
 # Logs  : logs/j-03e/                  (unique America/Chicago timestamps)
 # Runs  : results/j-03e/               (diagnostics and per-run summaries)
 #
@@ -44,15 +44,18 @@
 set -Eeuo pipefail
 
 EXPERIMENT="j-03e"
-VERSION="v2"
+VERSION="v3"
+DATASET_VERSION="v2"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PYTHON_BIN="python3"
 PYTHON_SCRIPT="$ROOT/src/py3/j-03e-negative-clones.py"
-POSITIVE_ROOT="$ROOT/data/clone-detection/3pos-clones"
-NEGATIVE_ROOT="$ROOT/data/clone-detection/4neg-clones"
+POSITIVE_ROOT="$ROOT/data/clone-detection/java/3pos-clones"
+LEGACY_POSITIVE_ROOT="$ROOT/data/clone-detection/3pos-clones"
+NEGATIVE_ROOT="$ROOT/data/clone-detection/java/4neg-clones"
+LEGACY_NEGATIVE_ROOT="$ROOT/data/clone-detection/4neg-clones"
 RESULT_ROOT="$ROOT/results/j-03e"
 LOG_DIR="$ROOT/logs/j-03e"
-LOG_PREFIX="j-03e-v2-negative-clones"
+LOG_PREFIX="j-03e-v3-negative-clones"
 LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S-%N"
 LOG_TEE_APPEND="true"
 TIME_ZONE="America/Chicago"
@@ -109,7 +112,7 @@ Usage:
   bash src/sh3/j-03e-negative-clones.sh --negativeclone-feasibility [--subject SUBJECT]
   bash src/sh3/j-03e-negative-clones.sh --negativeclone [--subject SUBJECT]
   bash src/sh3/j-03e-negative-clones.sh --negativeclone-verify [--subject SUBJECT]
-J-03e v2 never changes the 3pos-clones inputs. Outputs require AST score < 0.20.
+J-03e v3 preserves the v2 dataset schema and never changes the 3pos-clones inputs. Outputs require AST score < 0.20.
 USAGE
 }
 
@@ -155,12 +158,12 @@ on_exit() {
   end="$(date +%s)"
   if (( status == 0 )); then FINAL_STATUS="PASS"; else FINAL_STATUS="FAIL"; fi
   FINAL_EXIT="$status"
-  log "$FINAL_STATUS FINAL experiment=$EXPERIMENT version=$VERSION mode=$MODE subject=$SUBJECT exit=$FINAL_EXIT start_epoch=$START_EPOCH end=$(chicago) elapsed_sec=$((end-START_EPOCH)) run=$RUN_DIR log=$LOG_FILE input=$POSITIVE_ROOT output=$NEGATIVE_ROOT"
+  log "$FINAL_STATUS FINAL experiment=$EXPERIMENT version=$VERSION dataset_version=$DATASET_VERSION mode=$MODE subject=$SUBJECT exit=$FINAL_EXIT start_epoch=$START_EPOCH end=$(chicago) elapsed_sec=$((end-START_EPOCH)) run=$RUN_DIR log=$LOG_FILE input=$POSITIVE_ROOT output=$NEGATIVE_ROOT"
   exit "$status"
 }
 trap on_exit EXIT
 
-log "START experiment=$EXPERIMENT version=$VERSION mode=$MODE subject=$SUBJECT run=$RUN_DIR log=$LOG_FILE"
+log "START experiment=$EXPERIMENT version=$VERSION dataset_version=$DATASET_VERSION mode=$MODE subject=$SUBJECT run=$RUN_DIR log=$LOG_FILE"
 log "CONFIG input=$POSITIVE_ROOT output=$NEGATIVE_ROOT expected_subjects=$EXPECTED_SUBJECTS expected_npos=$EXPECTED_TOTAL_POSITIVES ref_summary_sha256=$REFERENCE_SUMMARY_SHA256 h07=$H07_PYTHON h08=$H08_PYTHON parser=$PARSER_VERSION grammar=$GRAMMAR_VERSION ast_gram=$AST_GRAM_SIZE ast_max_cells=$AST_MAX_CELLS positive_ast_threshold=$POSITIVE_AST_THRESHOLD negative_similarity_exclusive=$NEGATIVE_SIMILARITY_MAX seed=$SAMPLE_SEED attempts_per_target=$ATTEMPTS_PER_TARGET attempt_cap=$ATTEMPT_LIMIT_CAP feasibility_probe=$FEASIBILITY_PROBE_PAIRS progress=$PROGRESS_EVERY time_zone=$TIME_ZONE"
 log "START step=preflight"
 [[ -f "$PYTHON_SCRIPT" && -f "$H07_PYTHON" && -f "$H08_PYTHON" ]] || {
@@ -172,9 +175,11 @@ log "PASS step=preflight"
 log "START step=$MODE"
 set +e
 "$PYTHON_BIN" -u "$PYTHON_SCRIPT" \
-  --experiment "$EXPERIMENT" --version "$VERSION" --mode "$MODE" --subject "$SUBJECT" \
+  --experiment "$EXPERIMENT" --version "$DATASET_VERSION" --script-version "$VERSION" --mode "$MODE" --subject "$SUBJECT" \
   --time-zone "$TIME_ZONE" --positive-root "$POSITIVE_ROOT" \
   --negative-root "$NEGATIVE_ROOT" --run-dir "$RUN_DIR" \
+  --legacy-positive-root "$LEGACY_POSITIVE_ROOT" \
+  --legacy-negative-root "$LEGACY_NEGATIVE_ROOT" \
   --reference-summary-name "$REFERENCE_SUMMARY_NAME" \
   --reference-summary-sha256 "$REFERENCE_SUMMARY_SHA256" \
   --source-manifest-name "$SOURCE_MANIFEST_NAME" \

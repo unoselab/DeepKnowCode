@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# DeepKnowCode J-03d v8 - Positive Clones + H-07/H-08 AST Type Audit
+# DeepKnowCode J-03d v9 (v8 dataset compatible) - Positive Clones + H-07/H-08 AST Type Audit
 # =============================================================================
 # Run from the DeepKnowCode project root in this order:
 #
@@ -33,9 +33,9 @@
 # Optional single subject:
 # bash src/sh3/j-03d-positive-clones.sh --subject apache__camel
 #
-# Authoritative clone pair INPUT: data/clone-detection/2after-preproc/
+# Authoritative clone pair INPUT: data/clone-detection/java/2after-preproc/
 # Java code SOURCE: data/repositories/java-repo-preproc/
-# Positive pair OUTPUT: data/clone-detection/3pos-clones/
+# Positive pair OUTPUT: data/clone-detection/java/3pos-clones/
 # Never read 1before-preproc or overwrite existing verified output.
 # Shell owns all parameters and America/Chicago step-level logging.
 # =============================================================================
@@ -43,10 +43,13 @@ set -Eeuo pipefail
 
 # --------------------------- Experiment configuration -----------------------
 EXPERIMENT="j-03d"
-VERSION="v8"
+VERSION="v9"
+DATASET_VERSION="v8"
+LEGACY_INPUT_RELATIVE="data/clone-detection/2after-preproc"
+LEGACY_OUTPUT_RELATIVE="data/clone-detection/3pos-clones"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-EXPECTED_INPUT_RELATIVE="data/clone-detection/2after-preproc"
-EXPECTED_OUTPUT_RELATIVE="data/clone-detection/3pos-clones"
+EXPECTED_INPUT_RELATIVE="data/clone-detection/java/2after-preproc"
+EXPECTED_OUTPUT_RELATIVE="data/clone-detection/java/3pos-clones"
 INPUT_ROOT="$ROOT/$EXPECTED_INPUT_RELATIVE"
 SOURCE_ROOT="$ROOT/data/repositories/java-repo-preproc"
 OUTPUT_ROOT="$ROOT/$EXPECTED_OUTPUT_RELATIVE"
@@ -145,7 +148,7 @@ case "${1:-}" in
 esac
 # ----------------------------- Logging configuration ------------------------
 LOG_DIR="$ROOT/logs/j-03d"
-LOG_PREFIX="j-03d-v8-positive-clones"
+LOG_PREFIX="j-03d-v9-positive-clones"
 LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S-%6N"
 LOG_TIME_ZONE="America/Chicago"
 LOG_TEE_APPEND="true"
@@ -198,7 +201,7 @@ finish() {
   local ec="$?"
   trap - EXIT
   if (( ec != 0 )); then FINAL_STATUS="FAIL"; fi
-  echo "[$(now)] $FINAL_STATUS FINAL experiment=$EXPERIMENT version=$VERSION mode=$MODE subject=$CURRENT_SUBJECT exit=$ec start=$START_TIME end=$(now) elapsed_sec=$(($(date +%s)-START_EPOCH)) run=$RUN_DIR log=$LOG_FILE input=$INPUT_ROOT output=$OUTPUT_ROOT"
+  echo "[$(now)] $FINAL_STATUS FINAL experiment=$EXPERIMENT version=$VERSION dataset_version=$DATASET_VERSION mode=$MODE subject=$CURRENT_SUBJECT exit=$ec start=$START_TIME end=$(now) elapsed_sec=$(($(date +%s)-START_EPOCH)) run=$RUN_DIR log=$LOG_FILE input=$INPUT_ROOT output=$OUTPUT_ROOT"
   exit "$ec"
 }
 trap finish EXIT
@@ -207,7 +210,8 @@ trap 'exit 130' INT TERM
 exec 9>"$ROOT/data/clone-detection/.j03d-positive-clones.lock"
 flock -n 9 || { echo "[$(now)] FAIL another J-03d writer is active" >&2; exit 2; }
 COMMON=(
-  --experiment "$EXPERIMENT" --version "$VERSION"
+  --experiment "$EXPERIMENT" --version "$DATASET_VERSION" --script-version "$VERSION"
+  --legacy-input-relative "$LEGACY_INPUT_RELATIVE" --legacy-output-relative "$LEGACY_OUTPUT_RELATIVE"
   --project-root "$ROOT" --input-root "$INPUT_ROOT"
   --expected-input-relative "$EXPECTED_INPUT_RELATIVE"
   --source-root "$SOURCE_ROOT" --output-root "$OUTPUT_ROOT"
@@ -300,7 +304,7 @@ subjects() {
   mapfile -t SUBJECTS < <(printf '%s\n' "${SUBJECTS[@]}" | LC_ALL=C sort)
 }
 
-echo "[$(now)] START experiment=$EXPERIMENT version=$VERSION mode=$MODE run=$RUN_DIR log=$LOG_FILE"
+echo "[$(now)] START experiment=$EXPERIMENT version=$VERSION dataset_version=$DATASET_VERSION mode=$MODE run=$RUN_DIR log=$LOG_FILE"
 echo "[$(now)] CONFIG input=$INPUT_ROOT input_phase=$EXPECTED_INPUT_PHASE source=$SOURCE_ROOT output=$OUTPUT_ROOT expected_subjects=$EXPECTED_SUBJECTS expected_pairs=$EXPECTED_TOTAL_PAIRS detector=$EXPECTED_DETECTOR config=$EXPECTED_NICAD_CONFIG threshold=$EXPECTED_NICAD_THRESHOLD preproc_version=$EXPECTED_PREPROC_VERSION label=$POSITIVE_LABEL encoding=$CODE_ENCODING errors=$CODE_ERRORS time_zone=$LOG_TIME_ZONE progress_fragments=$PROGRESS_EVERY_FRAGMENTS progress_pairs=$PROGRESS_EVERY_PAIRS accepted_output_versions=$ACCEPTED_OUTPUT_VERSIONS ast_primary=$AST_PRIMARY_THRESHOLD ast_gram_size=$AST_GRAM_SIZE ast_max_cells=$AST_MAX_COMPARISON_CELLS ast_report=$AST_REPORT_NAME ast_nicad_bands=$AST_NICAD_BAND_EDGES clonetype_min=$CLONETYPE_MIN_SIMILARITY clonetype_max=$CLONETYPE_MAX_SIMILARITY clonetype_report=$CLONETYPE_REPORT_NAME clonetype_progress=$CLONETYPE_PROGRESS_EVERY_PAIRS positive_balance=$POSITIVE_BALANCE_POLICY positive_layout=$POSITIVE_LAYOUT positive_seed=$POSITIVE_SAMPLE_SEED positive_record_schema=$POSITIVE_RECORD_SCHEMA function_id_source=$POSITIVE_FUNCTION_ID_SOURCE_FIELD positive_report=$POSITIVE_REPORT_NAME"
 case "$MODE" in
   --inspect)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""J-03d v8: immutable positive export/verification and H-07/H-08 AST type audit.
+"""J-03d v9 script (v8 dataset schema): immutable positive export/verification and H-07/H-08 AST type audit.
 
 All experiment configuration is mandatory and supplied by the standalone Shell.
 No input mutation, no negative labels, no train/validation/test partitioning.
@@ -221,6 +221,23 @@ def effective_configuration(args):
     }
 
 
+def verified_output_configuration(args, manifest):
+    """Accept only exact current settings or the exact pre-move root configuration."""
+    current = effective_configuration(args)
+    old_input = (args.project_root / args.legacy_input_relative).resolve()
+    old_output = (args.project_root / args.legacy_output_relative).resolve()
+    legacy = dict(current)
+    legacy.update(input_root=str(old_input), output_root=str(old_output),
+                  expected_input_relative=args.legacy_input_relative,
+                  expected_output_relative=args.legacy_output_relative)
+    recorded = manifest.get('configuration')
+    if recorded == current and manifest.get('input_root') == str(args.input_root):
+        return 'CURRENT'
+    if recorded == legacy and manifest.get('input_root') == str(old_input):
+        return 'LEGACY_RELOCATED'
+    fail('OUTPUT_MANIFEST_CONFIGURATION_DRIFT')
+
+
 def export_subject(args, subject):
     archived, source, manifest, source_hashes, preproc_sha = validate_input(args, subject)
     destination = args.output_root / subject
@@ -312,6 +329,7 @@ def export_subject(args, subject):
         artifact_hashes = {name: sha_file(pending / name) for name in ('positive_pairs.csv', 'fragments.jsonl')}
         output_manifest = {
             'experiment': args.experiment, 'version': args.version,
+            'script_version': args.script_version,
             'timestamp_chicago': timestamp(args), 'subject': subject,
             'status': 'PREPARED_VERIFIED', 'label': args.positive_label,
             'pair_type': 'NiCad-detected positive candidate; not manually adjudicated',
@@ -361,7 +379,7 @@ def verify_output(args, subject):
     checks = {
         'experiment': args.experiment,
         'subject': subject, 'status': 'PREPARED_VERIFIED',
-        'label': args.positive_label, 'input_root': str(args.input_root),
+        'label': args.positive_label,
         'source_root': str(args.source_root),
         'source_git_head': manifest['git_head'],
         'input_phase': args.expected_input_phase,
@@ -378,14 +396,19 @@ def verify_output(args, subject):
     }
     for key, value in checks.items():
         expected_value(m, key, value, 'OUTPUT_MANIFEST')
-    expected_value(m, 'configuration', effective_configuration(args), 'OUTPUT_MANIFEST')
+    layout_identity = verified_output_configuration(args, m)
+    expected_archive_root = (args.input_root if layout_identity == 'CURRENT' else
+                             (args.project_root / args.legacy_input_relative).resolve())
+    expected_value(m, 'input_archive', str(expected_archive_root / subject), 'OUTPUT_MANIFEST')
+    expected_value(m, 'source_repository', str(source), 'OUTPUT_MANIFEST')
     if not isinstance(m.get('files_sha256'), dict):
         fail(f'OUTPUT_HASHES_MISSING subject={subject}')
     for name in ('positive_pairs.csv', 'fragments.jsonl'):
         file = dest / name
         if not file.is_file() or file.is_symlink() or sha_file(file) != m['files_sha256'].get(name):
             fail(f'OUTPUT_FILE_SHA256_MISMATCH subject={subject} file={name}')
-    print(f'VERIFY_PASS subject={subject} pairs={m["pairs"]} fragments={m["fragments"]}', flush=True)
+    print(f'VERIFY_PASS subject={subject} pairs={m["pairs"]} fragments={m["fragments"]} '
+          f'layout_identity={layout_identity}', flush=True)
     return m
 
 
@@ -469,6 +492,7 @@ def main():
                  'expected-subjects', 'expected-total-pairs',
                  'expected-input-experiment', 'expected-input-version',
                  'expected-input-phase', 'expected-input-status',
+                 'script-version', 'legacy-input-relative', 'legacy-output-relative',
                  'expected-preproc-experiment', 'expected-preproc-version',
                  'expected-preproc-status', 'expected-nicad-config',
                  'expected-nicad-threshold', 'expected-detector',
@@ -518,10 +542,18 @@ def main():
         p.error('Invalid mode')
     if a.mode in ('export', 'verify', 'clonetypes-smoke') and not NAME.fullmatch(a.subject):
         p.error('Invalid subject name')
-    for rel in ('expected_input_relative', 'expected_output_relative'):
+    if a.script_version != 'v9' or a.version != 'v8':
+        p.error('J03D_SCRIPT_OR_DATASET_VERSION_MISMATCH')
+    for rel in ('expected_input_relative', 'expected_output_relative',
+                'legacy_input_relative', 'legacy_output_relative'):
         value = Path(getattr(a, rel))
         if value.is_absolute() or '..' in value.parts or not value.parts:
             p.error(f'Invalid relative path: {rel}')
+    for current, old in ((a.expected_input_relative, a.legacy_input_relative),
+                         (a.expected_output_relative, a.legacy_output_relative)):
+        legacy_path = Path(old)
+        if Path(current) != legacy_path.parent / 'java' / legacy_path.name:
+            p.error('INVALID_JAVA_LAYOUT_RELOCATION')
     if a.input_root != (a.project_root / a.expected_input_relative).resolve():
         p.error(f'WRONG_INPUT_ROOT: expected {a.project_root / a.expected_input_relative}; got {a.input_root}')
     if a.output_root != (a.project_root / a.expected_output_relative).resolve():

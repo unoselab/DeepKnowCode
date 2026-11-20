@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
-# Standalone J-03c v1. All experiment settings and logging controlled by this Shell.
+# Standalone J-03c v2 (v1 archive data preserved). All experiment settings and logging controlled by this Shell.
 set -Eeuo pipefail
 EXPERIMENT="j-03c"
-VERSION="v1"
+VERSION="v2"
+ARCHIVE_DATA_VERSION="v1"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 REPO_ROOT="$ROOT/data/repositories/java-repos"
 PREPROC_ROOT="$ROOT/data/repositories/java-repo-preproc"
 J03A_RUN="$ROOT/results/j-03a/20261116-165011-200729-all-9Gte3a"
 J03B_SMOKE_RUN="$ROOT/results/j-03b/20261117-114822-047349-778239-56ec5466cbc5-smoke"
-BEFORE_ROOT="$ROOT/data/clone-detection/1before-preproc"
-AFTER_ROOT="$ROOT/data/clone-detection/2after-preproc"
+BEFORE_ROOT="$ROOT/data/clone-detection/java/1before-preproc"
+AFTER_ROOT="$ROOT/data/clone-detection/java/2after-preproc"
 RESULT_ROOT="$ROOT/results/j-03c"
 LOG_DIR="$ROOT/logs/j-03c"
-LOG_PREFIX="j-03c-v1-nicad-archive"
+LOG_PREFIX="j-03c-v2-nicad-archive"
 LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S-%6N"
 LOG_TEE_APPEND="true"
 LOG_CAPTURE_STDOUT="true"
@@ -71,7 +72,7 @@ finish() {
   local ec="$?"
   trap - EXIT
   if (( ec != 0 )); then FINAL_STATUS="FAIL"; fi
-  echo "[$(now)] ${FINAL_STATUS} FINAL experiment=$EXPERIMENT version=$VERSION mode=$MODE subject=$CURRENT_SUBJECT exit=$ec start_epoch=$START_EPOCH end_epoch=$(date +%s) elapsed_sec=$(($(date +%s)-START_EPOCH)) before=$BEFORE_ROOT after=$AFTER_ROOT result_run=$RUN log=$LOG_FILE"
+  echo "[$(now)] ${FINAL_STATUS} FINAL experiment=$EXPERIMENT version=$VERSION archive_data_version=$ARCHIVE_DATA_VERSION mode=$MODE subject=$CURRENT_SUBJECT exit=$ec start_epoch=$START_EPOCH end_epoch=$(date +%s) elapsed_sec=$(($(date +%s)-START_EPOCH)) before=$BEFORE_ROOT after=$AFTER_ROOT result_run=$RUN log=$LOG_FILE"
   exit "$ec"
 }
 terminate() {
@@ -83,7 +84,7 @@ terminate() {
 }
 trap finish EXIT
 trap terminate TERM INT
-COMMON=(--experiment "$EXPERIMENT" --version "$VERSION" --subject "$SMOKE_SUBJECT" \
+COMMON=(--experiment "$EXPERIMENT" --version "$ARCHIVE_DATA_VERSION" --subject "$SMOKE_SUBJECT" \
   --repo-root "$REPO_ROOT" --preproc-root "$PREPROC_ROOT" --j03a-run "$J03A_RUN" \
   --before-root "$BEFORE_ROOT" --after-root "$AFTER_ROOT" --report-dir "$RUN" \
   --expected-subjects "$EXPECTED_SUBJECTS" --config "$NICAD_CONFIG" \
@@ -220,7 +221,7 @@ run_after_all() {
   (( failures == 0 )) || return 2
   (( differences == 0 )) || return 3
 }
-echo "[$(now)] START experiment=$EXPERIMENT version=$VERSION mode=$MODE run=$RUN log=$LOG_FILE"
+echo "[$(now)] START experiment=$EXPERIMENT version=$VERSION archive_data_version=$ARCHIVE_DATA_VERSION mode=$MODE run=$RUN log=$LOG_FILE"
 echo "[$(now)] CONFIG before=$BEFORE_ROOT after=$AFTER_ROOT raw=$REPO_ROOT preproc=$PREPROC_ROOT baseline=$J03A_RUN baseline_version=$BASELINE_VERSION preproc_version=$PREPROC_VERSION expected_subjects=$EXPECTED_SUBJECTS config=$NICAD_CONFIG threshold=$NICAD_THRESHOLD granularity=$NICAD_GRANULARITY language=$NICAD_LANGUAGE reuse_smoke=$REUSE_VERIFIED_J03B_SMOKE smoke_run=$J03B_SMOKE_RUN strict_parse=$STRICT_PARSE_FAILURES"
 case "$MODE" in
   --inspect) CURRENT_SUBJECT="global"; step inventory runpy inspect "$SMOKE_SUBJECT" ;;

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Standalone J-03d v7 migration of verified v6 balanced positives.
+# Standalone J-03d v8 migration of verified v6 balanced positives.
 # Run once from DeepKnowCode root; does not call any other shell wrapper.
 # Preserve all v6 Manifest contents and bytes. Never overwrite a destination.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 EXPERIMENT="j-03d"
-VERSION="v7"
+VERSION="v8"
 MODE="migrate-sameratio-type"
-BASE="$ROOT/data/clone-detection/3pos-clones"
+BASE="$ROOT/data/clone-detection/java/3pos-clones"
 EXPECTED_SUBJECTS=47
 LOG_DIR="$ROOT/logs/j-03d"
-LOG_PREFIX="j-03d-v7-migrate-sameratio-type"
+LOG_PREFIX="j-03d-v8-migrate-sameratio-type"
 LOG_TIMESTAMP_FORMAT="%Y%m%d-%H%M%S-%6N"
 LOG_TIME_ZONE="America/Chicago"
 LOG_TEE_APPEND="true"
